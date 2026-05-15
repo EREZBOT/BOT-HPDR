@@ -1,0 +1,15 @@
+{
+  "name": "hpdr-bot",
+  "version": "1.0.0",
+  "description": "HPDR Trading Bot - Gate.io Perpetual Futures",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^14.0.0",
+    "@supabase/supabase-js": "^2.39.0"
+  }
+}
