@@ -1,6 +1,16 @@
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
+async function getPrice(symbol) {
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    const data = await res.json();
+    return parseFloat(data.price || 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function saveTrade(trade) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/trades`, {
     method: 'POST',
@@ -20,11 +30,16 @@ export async function POST(req) {
     const body = await req.json();
     const { action, symbol, sl_pct = 2.5, price } = body;
 
-    if (!action || !symbol || !price) {
+    if (!action || !symbol) {
       return Response.json({ error: 'Missing fields' }, { status: 400 });
     }
 
-    const currentPrice = parseFloat(price);
+    const currentPrice = price ? parseFloat(price) : await getPrice(symbol);
+
+    if (!currentPrice) {
+      return Response.json({ error: 'Could not get price' }, { status: 500 });
+    }
+
     const isLong = action === 'long';
     const slPrice = isLong ? currentPrice * (1 - sl_pct / 100) : currentPrice * (1 + sl_pct / 100);
     const tp1Price = isLong ? currentPrice * 1.015 : currentPrice * 0.985;
