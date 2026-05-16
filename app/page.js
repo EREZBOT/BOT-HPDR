@@ -14,6 +14,16 @@ async function fetchTrades() {
   return res.json();
 }
 
+async function fetchPrice(symbol) {
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    const data = await res.json();
+    return parseFloat(data.price || 0);
+  } catch {
+    return 0;
+  }
+}
+
 function timeAgo(dateStr) {
   const diff = (Date.now() - new Date(dateStr)) / 1000;
   if (diff < 60) return `${Math.floor(diff)}s ago`;
@@ -41,15 +51,24 @@ function TPBar({ label, price, pct, color }) {
   );
 }
 
-function PositionCard({ trade }) {
+function PositionCard({ trade, livePrice }) {
   const isLong = trade.direction === 'long';
-  const pnl = Number(trade.pnl_usdt || 0);
   const entry = Number(trade.entry_price);
   const tp1 = Number(trade.tp1_price);
   const tp2 = Number(trade.tp2_price);
   const tp3 = Number(trade.tp3_price);
   const sl = Number(trade.sl_price);
-  const pct1 = tp1 ? Math.min(100, Math.max(0, Math.round(Math.abs((entry - entry) / (tp1 - entry)) * 100))) : 0;
+  const current = livePrice || entry;
+
+  const pnlPct = isLong
+    ? ((current - entry) / entry) * 100
+    : ((entry - current) / entry) * 100;
+  const pnlUsdt = pnlPct * entry * Number(trade.size) / 100;
+
+  const progress = isLong ? current - entry : entry - current;
+  const pct1 = tp1 ? Math.min(100, Math.max(0, Math.round((progress / (tp1 - entry || 1)) * 100))) : 0;
+  const pct2 = tp2 ? Math.min(100, Math.max(0, Math.round((progress / (tp2 - entry || 1)) * 100))) : 0;
+  const pct3 = tp3 ? Math.min(100, Math.max(0, Math.round((progress / (tp3 - entry || 1)) * 100))) : 0;
 
   return (
     <div style={{
@@ -63,7 +82,7 @@ function PositionCard({ trade }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{
-            fontSize: 10, fontWeight: 500, padding: '3px 8px', borderRadius: 4, letterSpacing: '0.5px',
+            fontSize: 10, fontWeight: 500, padding: '3px 8px', borderRadius: 4,
             background: isLong ? '#001a0e' : '#1a0008',
             color: isLong ? '#00e87a' : '#ff4466',
             border: `0.5px solid ${isLong ? '#00e87a44' : '#ff446644'}`,
@@ -72,30 +91,35 @@ function PositionCard({ trade }) {
           </span>
           <span style={{ fontSize: 14, fontWeight: 500, color: '#e8e8f0' }}>{trade.contract}</span>
         </div>
-        <span style={{ fontSize: 16, fontWeight: 500, fontFamily: 'monospace', color: pnl >= 0 ? '#00e87a' : '#ff4466' }}>
-          {pnl >= 0 ? '+' : ''}${fmt(pnl)}
-        </span>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 16, fontWeight: 500, fontFamily: 'monospace', color: pnlUsdt >= 0 ? '#00e87a' : '#ff4466' }}>
+            {pnlUsdt >= 0 ? '+' : ''}${fmt(pnlUsdt)}
+          </div>
+          <div style={{ fontSize: 11, color: pnlPct >= 0 ? '#00e87a' : '#ff4466' }}>
+            {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+          </div>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginBottom: 12 }}>
         {[
           ['Entry', `$${fmt(entry)}`],
+          ['Current', `$${fmt(current)}`],
           ['Size', `${trade.size} contracts`],
           ['Stop loss', `$${fmt(sl)}`],
           ['TP1', `$${fmt(tp1)}`],
           ['TP2', `$${fmt(tp2)}`],
-          ['TP3', `$${fmt(tp3)}`],
         ].map(([label, val]) => (
           <div key={label}>
             <div style={{ fontSize: 10, color: '#5a5a7a', marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 11, color: label === 'Stop loss' ? '#ff4466' : '#b0b0cc', fontFamily: 'monospace' }}>{val}</div>
+            <div style={{ fontSize: 11, color: label === 'Stop loss' ? '#ff4466' : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466') : '#b0b0cc', fontFamily: 'monospace' }}>{val}</div>
           </div>
         ))}
       </div>
 
-      <TPBar label="TP1 — Median" price={tp1} pct={pct1} color="#00e87a" />
-      <TPBar label="TP2 — 61.8%" price={tp2} pct={Math.round(pct1 * 0.6)} color="#3a3a5a" />
-      <TPBar label="TP3 — 88.3%" price={tp3} pct={Math.round(pct1 * 0.3)} color="#2a2a4a" />
+      <TPBar label="TP1 — 1.5%" price={tp1} pct={Math.min(100, pct1)} color="#00e87a" />
+      <TPBar label="TP2 — 2.5%" price={tp2} pct={Math.min(100, pct2)} color="#3a3a5a" />
+      <TPBar label="TP3 — 4.0%" price={tp3} pct={Math.min(100, pct3)} color="#2a2a4a" />
 
       <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 8, textAlign: 'right' }}>
         Opened {timeAgo(trade.created_at)}
@@ -129,6 +153,7 @@ function HistoryRow({ trade }) {
 
 export default function Dashboard() {
   const [trades, setTrades] = useState([]);
+  const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
 
@@ -137,6 +162,13 @@ export default function Dashboard() {
     if (Array.isArray(data)) {
       setTrades(data);
       setLastUpdate(new Date());
+      const open = data.filter(t => t.status === 'open');
+      const symbols = [...new Set(open.map(t => t.contract))];
+      const priceMap = {};
+      await Promise.all(symbols.map(async s => {
+        priceMap[s] = await fetchPrice(s);
+      }));
+      setPrices(priceMap);
     }
     setLoading(false);
   };
@@ -150,14 +182,18 @@ export default function Dashboard() {
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
   const wins = closed.filter(t => Number(t.pnl_usdt) > 0);
-  const totalPnl = closed.reduce((sum, t) => sum + Number(t.pnl_usdt || 0), 0);
+  const openPnl = open.reduce((t, trade) => {
+    const entry = Number(trade.entry_price);
+    const current = prices[trade.contract] || entry;
+    const isLong = trade.direction === 'long';
+    const pnl = isLong ? (current - entry) * Number(trade.size) : (entry - current) * Number(trade.size);
+    return t + pnl;
+  }, 0);
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
 
   const s = {
     dash: { background: '#0a0a0f', minHeight: '100vh', padding: 20, fontFamily: "'JetBrains Mono', monospace", color: '#e8e8f0' },
     topbar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, paddingBottom: 16, borderBottom: '0.5px solid #1e1e2e' },
-    logo: { fontSize: 20, fontWeight: 500, letterSpacing: -1, color: '#e8e8f0' },
-    livePill: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 },
     statRow: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 },
     stat: { background: '#11111e', border: '0.5px solid #1e1e2e', borderRadius: 8, padding: 14 },
     statLabel: { fontSize: 10, color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 },
@@ -168,9 +204,12 @@ export default function Dashboard() {
 
   return (
     <div style={s.dash}>
+      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
       <div style={s.topbar}>
-        <div style={s.logo}>HPDR<span style={{ color: '#00e87a' }}>bot</span></div>
-        <div style={s.livePill}>
+        <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
+          HPDR<span style={{ color: '#00e87a' }}>bot</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00e87a', display: 'inline-block' }} />
           Live · BTC/USDT Perpetual
           {lastUpdate && <span style={{ color: '#5a5a7a', marginLeft: 8 }}>· {timeAgo(lastUpdate.toISOString())}</span>}
@@ -186,7 +225,7 @@ export default function Dashboard() {
               ['Total trades', closed.length, '#4488ff'],
               ['Win rate', `${winRate}%`, '#00e87a'],
               ['Open now', open.length, '#ffaa00'],
-              ['Total P&L', `${totalPnl >= 0 ? '+' : ''}$${fmt(totalPnl)}`, totalPnl >= 0 ? '#00e87a' : '#ff4466'],
+              ['Open P&L', `${openPnl >= 0 ? '+' : ''}$${fmt(openPnl)}`, openPnl >= 0 ? '#00e87a' : '#ff4466'],
             ].map(([label, val, color]) => (
               <div key={label} style={s.stat}>
                 <div style={s.statLabel}>{label}</div>
@@ -200,7 +239,7 @@ export default function Dashboard() {
             {open.length === 0 ? (
               <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
             ) : (
-              open.map(t => <PositionCard key={t.id} trade={t} />)
+              open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} />)
             )}
           </div>
 
