@@ -18,22 +18,13 @@ async function saveTrade(trade) {
 export async function POST(req) {
   try {
     const body = await req.json();
-    const { action, symbol, sl_pct = 2.5 } = body;
+    const { action, symbol, sl_pct = 2.5, price } = body;
 
-    if (!action || !symbol) {
-      return Response.json({ error: 'Missing action or symbol' }, { status: 400 });
+    if (!action || !symbol || !price) {
+      return Response.json({ error: 'Missing fields' }, { status: 400 });
     }
 
-    // Get price from Binance
-    const pair = symbol.replace('_', '');
-    const ticker = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`);
-    const tickerData = await ticker.json();
-    const currentPrice = parseFloat(tickerData.price || 0);
-
-    if (!currentPrice) {
-      return Response.json({ error: 'Could not get price' }, { status: 500 });
-    }
-
+    const currentPrice = parseFloat(price);
     const isLong = action === 'long';
     const slPrice = isLong ? currentPrice * (1 - sl_pct / 100) : currentPrice * (1 + sl_pct / 100);
     const tp1Price = isLong ? currentPrice * 1.015 : currentPrice * 0.985;
