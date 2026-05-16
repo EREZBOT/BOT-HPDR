@@ -1,322 +1,159 @@
+'use client';
+import { useEffect, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SECRET_KEY
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_PUBLIC_SUPABASE_KEY || ''
 );
 
-export default async function Dashboard() {
-  const { data: trades } = await supabase
-    .from('trades')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(50);
+export default function Dashboard() {
+  const [trades, setTrades] = useState([]);
+  const [time, setTime] = useState(new Date());
 
-  const { data: stats } = await supabase
-    .from('trade_stats')
-    .select('*')
-    .single();
+  useEffect(() => {
+    fetchTrades();
+    const interval = setInterval(() => { fetchTrades(); setTime(new Date()); }, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
-  const openTrades = trades?.filter(t => t.status === 'open') || [];
-  const closedTrades = trades?.filter(t => t.status !== 'open') || [];
+  async function fetchTrades() {
+    const { data } = await supabase.from('trades').select('*').order('created_at', { ascending: false }).limit(50);
+    if (data) setTrades(data);
+  }
+
+  const open = trades.filter(t => t.status === 'open');
+  const closed = trades.filter(t => t.status !== 'open');
+  const totalPnl = trades.reduce((s, t) => s + (t.pnl_usdt || 0), 0);
+  const wins = closed.filter(t => t.pnl_usdt > 0).length;
+  const winRate = closed.length > 0 ? Math.round((wins / closed.length) * 100) : 0;
 
   return (
-    <html>
-      <head>
-        <title>HPDR Bot Dashboard</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap');
-          
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          
-          :root {
-            --bg: #0a0a0f;
-            --surface: #12121a;
-            --border: #1e1e2e;
-            --green: #00ff88;
-            --red: #ff3366;
-            --blue: #4488ff;
-            --yellow: #ffd700;
-            --text: #e0e0f0;
-            --muted: #666680;
-          }
+    <div style={{ background:'#0a0a0f', minHeight:'100vh', color:'#e0e0f0', fontFamily:"'Space Mono', monospace", padding:'24px' }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        .pulse{animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+        .bl{background:rgba(0,255,136,0.15);color:#00ff88}
+        .bs{background:rgba(255,51,102,0.15);color:#ff3366}
+        .badge{display:inline-block;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase}
+        .bar{background:#1e1e2e;border-radius:4px;height:5px;flex:1}
+        .card{background:#12121a;border:1px solid #1e1e2e;border-radius:12px;padding:16px;margin-bottom:10px}
+        table{width:100%;border-collapse:collapse}
+        th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#666680;padding:12px 16px;border-bottom:1px solid #1e1e2e}
+        td{padding:14px 16px;border-bottom:1px solid #1e1e2e;font-size:13px}
+        tr:hover td{background:#0d0d14}
+      `}</style>
 
-          body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: 'Space Mono', monospace;
-            min-height: 100vh;
-            padding: 24px;
-          }
-
-          .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 32px;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 20px;
-          }
-
-          .logo {
-            font-family: 'Syne', sans-serif;
-            font-size: 28px;
-            font-weight: 800;
-            color: var(--green);
-            letter-spacing: -1px;
-          }
-
-          .logo span { color: var(--text); }
-
-          .status-dot {
-            width: 8px; height: 8px;
-            background: var(--green);
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-          }
-
-          @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
-          }
-
-          .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 16px;
-            margin-bottom: 32px;
-          }
-
-          .stat-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 20px;
-          }
-
-          .stat-label {
-            font-size: 11px;
-            color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 8px;
-          }
-
-          .stat-value {
-            font-family: 'Syne', sans-serif;
-            font-size: 28px;
-            font-weight: 800;
-          }
-
-          .stat-value.green { color: var(--green); }
-          .stat-value.red { color: var(--red); }
-          .stat-value.blue { color: var(--blue); }
-          .stat-value.yellow { color: var(--yellow); }
-
-          .section-title {
-            font-family: 'Syne', sans-serif;
-            font-size: 14px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            color: var(--muted);
-            margin-bottom: 16px;
-          }
-
-          .trades-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 40px;
-          }
-
-          .trades-table th {
-            text-align: left;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: var(--muted);
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border);
-          }
-
-          .trades-table td {
-            padding: 14px 16px;
-            border-bottom: 1px solid var(--border);
-            font-size: 13px;
-          }
-
-          .trades-table tr:hover td {
-            background: var(--surface);
-          }
-
-          .badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 700;
-            text-transform: uppercase;
-          }
-
-          .badge.long { background: rgba(0,255,136,0.15); color: var(--green); }
-          .badge.short { background: rgba(255,51,102,0.15); color: var(--red); }
-          .badge.open { background: rgba(68,136,255,0.15); color: var(--blue); }
-          .badge.closed { background: rgba(102,102,128,0.15); color: var(--muted); }
-          .badge.sl_hit { background: rgba(255,51,102,0.15); color: var(--red); }
-
-          .pnl.positive { color: var(--green); }
-          .pnl.negative { color: var(--red); }
-
-          .no-trades {
-            text-align: center;
-            padding: 40px;
-            color: var(--muted);
-            font-size: 14px;
-          }
-
-          .webhook-info {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            margin-top: 32px;
-          }
-
-          .webhook-url {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 12px 16px;
-            font-size: 13px;
-            color: var(--green);
-            margin-top: 12px;
-            word-break: break-all;
-          }
-
-          .section { margin-bottom: 32px; }
-        `}</style>
-      </head>
-      <body>
-        <div className="header">
-          <div className="logo">HPDR<span>Bot</span></div>
-          <div>
-            <span className="status-dot"></span>
-            <span style={{fontSize: '13px', color: 'var(--muted)'}}>Live</span>
-          </div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:28,borderBottom:'1px solid #1e1e2e',paddingBottom:20}}>
+        <div style={{fontFamily:'Syne,sans-serif',fontSize:26,fontWeight:800,color:'#00ff88',letterSpacing:'-1px'}}>
+          HPDR<span style={{color:'#e0e0f0',fontWeight:400}}>Bot</span>
         </div>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <span style={{fontSize:12,color:'#666680'}}>{time.toLocaleString('en-US')}</span>
+          <span style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#00ff88'}}>
+            <span className="pulse" style={{width:7,height:7,background:'#00ff88',borderRadius:'50%',display:'inline-block'}}></span>
+            LIVE
+          </span>
+        </div>
+      </div>
 
-        {/* Stats */}
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-label">סה"כ עסקאות</div>
-            <div className="stat-value blue">{stats?.total_trades || 0}</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:12,marginBottom:28}}>
+        {[
+          {label:'Total Trades',val:trades.length,color:'#4488ff'},
+          {label:'Open Positions',val:open.length,color:'#ffd700'},
+          {label:'Win Rate',val:`${winRate}%`,color:'#00ff88'},
+          {label:'Total P&L',val:`${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}`,color:totalPnl>=0?'#00ff88':'#ff3366'},
+          {label:'Closed Trades',val:closed.length,color:'#666680'},
+        ].map((s,i)=>(
+          <div key={i} style={{background:'#12121a',border:'1px solid #1e1e2e',borderRadius:12,padding:20}}>
+            <div style={{fontSize:11,color:'#666680',textTransform:'uppercase',letterSpacing:'1px',marginBottom:8}}>{s.label}</div>
+            <div style={{fontFamily:'Syne,sans-serif',fontSize:26,fontWeight:800,color:s.color}}>{s.val}</div>
           </div>
-          <div className="stat-card">
-            <div className="stat-label">עסקאות פתוחות</div>
-            <div className="stat-value yellow">{stats?.open_trades || 0}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">אחוז זכיות</div>
-            <div className="stat-value green">{stats?.win_rate_pct || 0}%</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">רווח כולל</div>
-            <div className={`stat-value ${(stats?.total_pnl || 0) >= 0 ? 'green' : 'red'}`}>
-              ${stats?.total_pnl || '0.00'}
+        ))}
+      </div>
+
+      <div style={{marginBottom:28}}>
+        <div style={{fontSize:11,textTransform:'uppercase',letterSpacing:'2px',color:'#666680',marginBottom:14}}>Open Positions ({open.length})</div>
+        {open.length===0?(
+          <div style={{textAlign:'center',padding:40,color:'#666680',background:'#12121a',borderRadius:12,border:'1px solid #1e1e2e'}}>No open positions</div>
+        ):open.map(t=>(
+          <div key={t.id} className="card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <span className={`badge ${t.direction==='long'?'bl':'bs'}`}>{t.direction==='long'?'▲ Long':'▼ Short'}</span>
+                <span style={{fontSize:15,fontWeight:700}}>{t.contract}</span>
+                <span style={{fontSize:11,color:'#666680'}}>{new Date(t.created_at).toLocaleString('en-US')}</span>
+              </div>
+              <span style={{fontSize:18,fontWeight:700,color:(t.pnl_usdt||0)>=0?'#00ff88':'#ff3366'}}>
+                {(t.pnl_usdt||0)>=0?'+':''}${(t.pnl_usdt||0).toFixed(2)}
+              </span>
             </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">ממוצע לעסקה</div>
-            <div className={`stat-value ${(stats?.avg_pnl || 0) >= 0 ? 'green' : 'red'}`}>
-              ${stats?.avg_pnl || '0.00'}
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:14}}>
+              {[
+                {label:'Entry',val:`$${parseFloat(t.entry_price).toFixed(2)}`},
+                {label:'Size',val:t.size},
+                {label:'Stop Loss',val:`$${parseFloat(t.sl_price||0).toFixed(2)}`,color:'#ff3366'},
+                {label:'Stage',val:`${t.stage||0}/3`},
+              ].map((f,i)=>(
+                <div key={i}>
+                  <div style={{fontSize:10,color:'#666680',marginBottom:3}}>{f.label}</div>
+                  <div style={{fontSize:13,color:f.color||'#e0e0f0'}}>{f.val}</div>
+                </div>
+              ))}
             </div>
+            {[
+              {label:'TP1',color:'#00ff88',done:t.stage>=1},
+              {label:'TP2',color:'#4488ff',done:t.stage>=2},
+              {label:'TP3',color:'#ffd700',done:t.stage>=3},
+            ].map((tp,i)=>(
+              <div key={i} style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                <span style={{fontSize:10,color:'#666680',width:24}}>{tp.label}</span>
+                <div className="bar">
+                  <div style={{height:5,borderRadius:4,background:tp.color,width:tp.done?'100%':'20%',transition:'width 0.5s'}}></div>
+                </div>
+                {tp.done&&<span style={{fontSize:10,color:tp.color}}>✓</span>}
+              </div>
+            ))}
           </div>
-        </div>
+        ))}
+      </div>
 
-        {/* Open Trades */}
-        <div className="section">
-          <div className="section-title">עסקאות פתוחות ({openTrades.length})</div>
-          {openTrades.length === 0 ? (
-            <div className="no-trades">אין עסקאות פתוחות כרגע</div>
-          ) : (
-            <table className="trades-table">
-              <thead>
-                <tr>
-                  <th>מטבע</th>
-                  <th>כיוון</th>
-                  <th>מחיר כניסה</th>
-                  <th>SL</th>
-                  <th>גודל</th>
-                  <th>תאריך</th>
-                </tr>
-              </thead>
+      <div>
+        <div style={{fontSize:11,textTransform:'uppercase',letterSpacing:'2px',color:'#666680',marginBottom:14}}>Trade History ({closed.length})</div>
+        {closed.length===0?(
+          <div style={{textAlign:'center',padding:40,color:'#666680',background:'#12121a',borderRadius:12,border:'1px solid #1e1e2e'}}>No closed trades yet</div>
+        ):(
+          <div style={{background:'#12121a',borderRadius:12,border:'1px solid #1e1e2e',overflow:'hidden'}}>
+            <table>
+              <thead><tr><th>Pair</th><th>Direction</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Reason</th><th>Date</th></tr></thead>
               <tbody>
-                {openTrades.map(t => (
+                {closed.map(t=>(
                   <tr key={t.id}>
-                    <td>{t.contract}</td>
-                    <td><span className={`badge ${t.direction}`}>{t.direction === 'long' ? '▲ Long' : '▼ Short'}</span></td>
+                    <td style={{fontWeight:700}}>{t.contract}</td>
+                    <td><span className={`badge ${t.direction==='long'?'bl':'bs'}`}>{t.direction==='long'?'▲ Long':'▼ Short'}</span></td>
                     <td>${parseFloat(t.entry_price).toFixed(2)}</td>
-                    <td style={{color: 'var(--red)'}}>${parseFloat(t.sl_price || 0).toFixed(2)}</td>
-                    <td>{t.size}</td>
-                    <td style={{color: 'var(--muted)', fontSize: '12px'}}>{new Date(t.created_at).toLocaleString('he-IL')}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Closed Trades */}
-        <div className="section">
-          <div className="section-title">היסטוריית עסקאות ({closedTrades.length})</div>
-          {closedTrades.length === 0 ? (
-            <div className="no-trades">אין היסטוריית עסקאות עדיין</div>
-          ) : (
-            <table className="trades-table">
-              <thead>
-                <tr>
-                  <th>מטבע</th>
-                  <th>כיוון</th>
-                  <th>כניסה</th>
-                  <th>יציאה</th>
-                  <th>P&L</th>
-                  <th>סיבת סגירה</th>
-                  <th>תאריך</th>
-                </tr>
-              </thead>
-              <tbody>
-                {closedTrades.map(t => (
-                  <tr key={t.id}>
-                    <td>{t.contract}</td>
-                    <td><span className={`badge ${t.direction}`}>{t.direction === 'long' ? '▲ Long' : '▼ Short'}</span></td>
-                    <td>${parseFloat(t.entry_price).toFixed(2)}</td>
-                    <td>${parseFloat(t.exit_price || 0).toFixed(2)}</td>
-                    <td className={`pnl ${(t.pnl_usdt || 0) >= 0 ? 'positive' : 'negative'}`}>
-                      {(t.pnl_usdt || 0) >= 0 ? '+' : ''}${parseFloat(t.pnl_usdt || 0).toFixed(2)}
+                    <td>${parseFloat(t.exit_price||0).toFixed(2)}</td>
+                    <td style={{color:(t.pnl_usdt||0)>=0?'#00ff88':'#ff3366',fontWeight:700}}>
+                      {(t.pnl_usdt||0)>=0?'+':''}${parseFloat(t.pnl_usdt||0).toFixed(2)}
                     </td>
-                    <td><span className={`badge ${t.close_reason === 'sl' ? 'sl_hit' : 'closed'}`}>{t.close_reason || '-'}</span></td>
-                    <td style={{color: 'var(--muted)', fontSize: '12px'}}>{new Date(t.created_at).toLocaleString('he-IL')}</td>
+                    <td style={{color:'#666680',fontSize:11,textTransform:'uppercase'}}>{t.close_reason||'-'}</td>
+                    <td style={{color:'#666680',fontSize:11}}>{new Date(t.created_at).toLocaleDateString('en-US')}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
-        </div>
-
-        {/* Webhook Info */}
-        <div className="webhook-info">
-          <div className="section-title">כתובת Webhook ל-TradingView</div>
-          <p style={{fontSize: '13px', color: 'var(--muted)', marginTop: '8px'}}>
-            הכנס את הכתובת הזו בהגדרות Alert ב-TradingView:
-          </p>
-          <div className="webhook-url">
-            https://YOUR-PROJECT.vercel.app/api/webhook
           </div>
+        )}
+      </div>
+
+      <div style={{marginTop:32,background:'#12121a',border:'1px solid #1e1e2e',borderRadius:12,padding:20}}>
+        <div style={{fontSize:11,textTransform:'uppercase',letterSpacing:'2px',color:'#666680',marginBottom:12}}>TradingView Webhook URL</div>
+        <div style={{background:'#0a0a0f',border:'1px solid #1e1e2e',borderRadius:8,padding:'12px 16px',fontSize:13,color:'#00ff88',wordBreak:'break-all'}}>
+          https://bot-hpdr.vercel.app/api/webhook
         </div>
-      </body>
-    </html>
+      </div>
+    </div>
   );
 }
