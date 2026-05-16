@@ -1,35 +1,5 @@
-import crypto from 'crypto';
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
-const GATE_API_URL = 'https://fx.gate.io';
-const GATE_API_KEY = process.env.GATE_API_KEY;
-const GATE_SECRET = process.env.GATE_SECRET;
-
-function gateSign(method, url, queryString, body, timestamp) {
-  const bodyHash = crypto.createHash('sha512').update(body || '').digest('hex');
-  const msg = `${method}\n${url}\n${queryString || ''}\n${bodyHash}\n${timestamp}`;
-  return crypto.createHmac('sha512', GATE_SECRET).update(msg).digest('hex');
-}
-
-async function gateRequest(method, path, params = {}, body = null) {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const queryString = method === 'GET' ? new URLSearchParams(params).toString() : '';
-  const bodyStr = body ? JSON.stringify(body) : '';
-  const sign = gateSign(method, path, queryString, bodyStr, timestamp);
-  const url = `${GATE_API_URL}${path}${queryString ? '?' + queryString : ''}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'KEY': GATE_API_KEY,
-      'Timestamp': timestamp,
-      'SIGN': sign,
-    },
-    body: bodyStr || undefined,
-  });
-  return res.json();
-}
 
 async function saveTrade(trade) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/trades`, {
@@ -54,8 +24,11 @@ export async function POST(req) {
       return Response.json({ error: 'Missing action or symbol' }, { status: 400 });
     }
 
-    const ticker = await gateRequest('GET', '/api/v4/futures/usdt/contracts/' + symbol);
-    const currentPrice = parseFloat(ticker.last_price || ticker.mark_price || 0);
+    // Get price from Binance
+    const pair = symbol.replace('_', '');
+    const ticker = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`);
+    const tickerData = await ticker.json();
+    const currentPrice = parseFloat(tickerData.price || 0);
 
     if (!currentPrice) {
       return Response.json({ error: 'Could not get price' }, { status: 500 });
