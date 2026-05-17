@@ -90,7 +90,6 @@ export async function POST(req) {
     const tp2Price = tp2 ? parseFloat(tp2) : isLong ? currentPrice * 1.025 : currentPrice * 0.975;
     const tp3Price = tp3 ? parseFloat(tp3) : isLong ? currentPrice * 1.04 : currentPrice * 0.96;
 
-    // פתח עסקה אמיתית ב-Gate.io
     const gateResult = await openGateTrade(symbol, isLong, 1);
     console.log('Gate.io result:', JSON.stringify(gateResult));
 
