@@ -1,3 +1,4 @@
+// HPDR Bot - Gate.io Integration
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const GATE_API_KEY = process.env.GATE_API_KEY;
