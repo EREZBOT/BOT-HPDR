@@ -46,4 +46,28 @@ export async function GET() {
       let status = 'open';
       let closeReason = null;
 
-      if (isLong && currentPrice <= trade.sl_price
+      if (isLong && currentPrice <= trade.sl_price) {
+        status = 'closed'; closeReason = 'sl';
+      } else if (!isLong && currentPrice >= trade.sl_price) {
+        status = 'closed'; closeReason = 'sl';
+      } else if (isLong && currentPrice >= trade.tp3_price) {
+        status = 'closed'; closeReason = 'tp3';
+      } else if (!isLong && currentPrice <= trade.tp3_price) {
+        status = 'closed'; closeReason = 'tp3';
+      }
+
+      await updateTrade(trade.id, {
+        current_price: currentPrice,
+        pnl_usdt: parseFloat(pnl.toFixed(2)),
+        status,
+        close_reason: closeReason,
+        exit_price: status === 'closed' ? currentPrice : null,
+      });
+      updated++;
+    }
+
+    return Response.json({ success: true, updated });
+  } catch (err) {
+    return Response.json({ error: err.message }, { status: 500 });
+  }
+}
