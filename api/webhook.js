@@ -1,5 +1,39 @@
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
+const GATE_API_KEY = process.env.GATE_API_KEY;
+const GATE_SECRET = process.env.GATE_SECRET;
+
+import crypto from 'crypto';
+
+function gateSignature(method, path, queryString, body, timestamp) {
+  const hashedBody = crypto.createHash('sha512').update(body || '').digest('hex');
+  const msg = `${method}\n${path}\n${queryString}\n${hashedBody}\n${timestamp}`;
+  return crypto.createHmac('sha512', GATE_SECRET).update(msg).digest('hex');
+}
+
+async function openGateTrade(symbol, isLong, size = 1) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const path = '/api/v4/futures/usdt/orders';
+  const body = JSON.stringify({
+    contract: symbol,
+    size: isLong ? size : -size,
+    price: '0',
+    tif: 'ioc',
+    text: 'hpdr-bot',
+  });
+  const sign = gateSignature('POST', path, '', body, timestamp);
+  const res = await fetch(`https://api.gateio.ws${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'KEY': GATE_API_KEY,
+      'SIGN': sign,
+      'Timestamp': timestamp,
+    },
+    body,
+  });
+  return res.json();
+}
 
 async function saveTrade(trade) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/trades`, {
@@ -52,10 +86,13 @@ export async function POST(req) {
       ? currentPrice * (1 - sl_pct / 100)
       : currentPrice * (1 + sl_pct / 100);
 
-    // השתמש ב-TP מהבנד האמיתי אם נשלח, אחרת חשב לפי אחוזים
     const tp1Price = tp1 ? parseFloat(tp1) : isLong ? currentPrice * 1.015 : currentPrice * 0.985;
     const tp2Price = tp2 ? parseFloat(tp2) : isLong ? currentPrice * 1.025 : currentPrice * 0.975;
     const tp3Price = tp3 ? parseFloat(tp3) : isLong ? currentPrice * 1.04 : currentPrice * 0.96;
+
+    // פתח עסקה אמיתית ב-Gate.io
+    const gateResult = await openGateTrade(symbol, isLong, 1);
+    console.log('Gate.io result:', JSON.stringify(gateResult));
 
     const trade = {
       contract: symbol,
@@ -73,104 +110,13 @@ export async function POST(req) {
     };
 
     const saved = await saveTrade(trade);
-    return Response.json({ success: true, trade: saved });
+    return Response.json({ success: true, trade: saved, gate: gateResult });
 
   } catch (err) {
     return Response.json({ error: err.message }, { status: 500 });
   }
 }
 
-export async function GET(req) {
-  // בדיקת TP/SL לכל הטריידים הפתוחים
-  try {
-    const trades = await getOpenTrades();
-    if (!Array.isArray(trades)) return Response.json({ checked: 0 });
-
-    let closed = 0;
-
-    for (const trade of trades) {
-      const entry = parseFloat(trade.entry_price);
-      const tp1 = parseFloat(trade.tp1_price);
-      const tp2 = parseFloat(trade.tp2_price);
-      const tp3 = parseFloat(trade.tp3_price);
-      const sl = parseFloat(trade.sl_price);
-      const isLong = trade.direction === 'long';
-      const stage = trade.stage || 0;
-
-      // קבל מחיר נוכחי
-      let current = 0;
-      try {
-        const priceRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${trade.contract}`);
-        const priceData = await priceRes.json();
-        current = parseFloat(priceData.price || 0);
-      } catch { continue; }
-
-      if (!current) continue;
-
-      const pnlPct = isLong ? ((current - entry) / entry) * 100 : ((entry - current) / entry) * 100;
-      const pnlUsdt = pnlPct * entry * trade.size / 100;
-
-      // בדוק SL
-      const slHit = isLong ? current <= sl : current >= sl;
-      if (slHit) {
-        await updateTrade(trade.id, {
-          status: 'closed',
-          close_reason: 'SL',
-          exit_price: current,
-          pnl_usdt: pnlUsdt,
-          pnl_pct: pnlPct,
-          closed_at: new Date().toISOString(),
-        });
-        closed++;
-        continue;
-      }
-
-      // בדוק TP1 (stage 0)
-      if (stage === 0) {
-        const tp1Hit = isLong ? current >= tp1 : current <= tp1;
-        if (tp1Hit) {
-          await updateTrade(trade.id, {
-            stage: 1,
-            pnl_usdt: pnlUsdt,
-            pnl_pct: pnlPct,
-          });
-        }
-      }
-
-      // בדוק TP2 (stage 1) → SL זז ל-Break Even
-      if (stage === 1) {
-        const tp2Hit = isLong ? current >= tp2 : current <= tp2;
-        if (tp2Hit) {
-          await updateTrade(trade.id, {
-            stage: 2,
-            sl_price: entry, // SL זז ל-Break Even
-            pnl_usdt: pnlUsdt,
-            pnl_pct: pnlPct,
-          });
-        }
-      }
-
-      // בדוק TP3 (stage 2) → סגור הכל
-      if (stage === 2) {
-        const tp3Hit = isLong ? current >= tp3 : current <= tp3;
-        if (tp3Hit) {
-          await updateTrade(trade.id, {
-            status: 'closed',
-            close_reason: 'TP3',
-            exit_price: current,
-            pnl_usdt: pnlUsdt,
-            pnl_pct: pnlPct,
-            closed_at: new Date().toISOString(),
-          });
-          closed++;
-        } else {
-          await updateTrade(trade.id, { pnl_usdt: pnlUsdt, pnl_pct: pnlPct });
-        }
-      }
-    }
-
-    return Response.json({ checked: trades.length, closed });
-  } catch (err) {
-    return Response.json({ error: err.message }, { status: 500 });
-  }
+export async function GET() {
+  return Response.json({ error: 'Method not allowed' }, { status: 405 });
 }
