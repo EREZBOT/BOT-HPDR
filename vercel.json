@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/webhook",
+      "path": "/api/monitor",
       "schedule": "* * * * *"
     }
   ]
