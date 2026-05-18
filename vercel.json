@@ -1,8 +1,131 @@
-{
-  "crons": [
-    {
-      "path": "/api/monitor",
-      "schedule": "* * * * *"
-    }
-  ]
-}
+//@version=5
+indicator("Monthly Range Channel", overlay=true, max_labels_count=50)
+
+highLowColor = input.color(color.new(color.orange, 0),  "High / Low Line Color")
+midColor     = input.color(color.new(color.white,  0),  "Mid Line Color")
+upperFillCol = input.color(color.new(color.orange, 88), "Upper Zone Fill")
+lowerFillCol = input.color(color.new(color.blue,   88), "Lower Zone Fill")
+lineWid      = input.int(2, "Line Width", minval=1, maxval=4)
+showLabels   = input.bool(true, "Show Labels")
+
+m1High  = request.security(syminfo.tickerid, "M", high[1],      lookahead=barmerge.lookahead_on)
+m1Low   = request.security(syminfo.tickerid, "M", low[1],       lookahead=barmerge.lookahead_on)
+m1Time  = request.security(syminfo.tickerid, "M", time[1],      lookahead=barmerge.lookahead_on)
+
+m2High  = request.security(syminfo.tickerid, "M", high[2],      lookahead=barmerge.lookahead_on)
+m2Low   = request.security(syminfo.tickerid, "M", low[2],       lookahead=barmerge.lookahead_on)
+m2Time  = request.security(syminfo.tickerid, "M", time[2],      lookahead=barmerge.lookahead_on)
+
+m3High  = request.security(syminfo.tickerid, "M", high[3],      lookahead=barmerge.lookahead_on)
+m3Low   = request.security(syminfo.tickerid, "M", low[3],       lookahead=barmerge.lookahead_on)
+m3Time  = request.security(syminfo.tickerid, "M", time[3],      lookahead=barmerge.lookahead_on)
+
+m1Range = m1High - m1Low
+m2Range = m2High - m2Low
+m3Range = m3High - m3Low
+
+bigHigh = m1Range >= m2Range and m1Range >= m3Range ? m1High :
+          m2Range >= m1Range and m2Range >= m3Range ? m2High : m3High
+
+bigLow  = m1Range >= m2Range and m1Range >= m3Range ? m1Low :
+          m2Range >= m1Range and m2Range >= m3Range ? m2Low : m3Low
+
+bigTime = m1Range >= m2Range and m1Range >= m3Range ? m1Time :
+          m2Range >= m1Range and m2Range >= m3Range ? m2Time : m3Time
+
+bigMid  = (bigHigh + bigLow) / 2
+
+whichMonth = m1Range >= m2Range and m1Range >= m3Range ? "M-1" :
+             m2Range >= m1Range and m2Range >= m3Range ? "M-2" : "M-3"
+
+var line lineHigh = na
+var line lineMid  = na
+var line lineLow  = na
+var linefill lfUp = na
+var linefill lfDn = na
+var label lblHigh = na
+var label lblMid  = na
+var label lblLow  = na
+var label lblStar = na
+var label lblUp   = na
+var label lblDn   = na
+
+if barstate.islast
+
+    line.delete(lineHigh)
+    line.delete(lineMid)
+    line.delete(lineLow)
+    linefill.delete(lfUp)
+    linefill.delete(lfDn)
+    label.delete(lblHigh)
+    label.delete(lblMid)
+    label.delete(lblLow)
+    label.delete(lblStar)
+    label.delete(lblUp)
+    label.delete(lblDn)
+
+    startBar = bar_index[0]
+
+    for i = 0 to 5000
+        if time[i] <= bigTime
+            startBar := bar_index - i
+            break
+
+    lineHigh := line.new(startBar, bigHigh, bar_index + 30, bigHigh,
+                 color=highLowColor, width=lineWid,
+                 extend=extend.right)
+
+    lineMid  := line.new(startBar, bigMid, bar_index + 30, bigMid,
+                 color=midColor, width=lineWid,
+                 style=line.style_dashed,
+                 extend=extend.right)
+
+    lineLow  := line.new(startBar, bigLow, bar_index + 30, bigLow,
+                 color=highLowColor, width=lineWid,
+                 extend=extend.right)
+
+    lfUp := linefill.new(lineHigh, lineMid, color=upperFillCol)
+    lfDn := linefill.new(lineMid,  lineLow, color=lowerFillCol)
+
+    if showLabels
+        lblHigh := label.new(bar_index + 3, bigHigh,
+                     "HIGH  " + str.tostring(bigHigh, "#.##"),
+                     color=color.new(color.orange, 0),
+                     textcolor=color.black,
+                     style=label.style_label_left,
+                     size=size.small)
+
+        lblMid  := label.new(bar_index + 3, bigMid,
+                     "MID  " + str.tostring(bigMid, "#.##"),
+                     color=color.new(color.gray, 20),
+                     textcolor=color.white,
+                     style=label.style_label_left,
+                     size=size.small)
+
+        lblLow  := label.new(bar_index + 3, bigLow,
+                     "LOW  " + str.tostring(bigLow, "#.##"),
+                     color=color.new(color.orange, 0),
+                     textcolor=color.black,
+                     style=label.style_label_left,
+                     size=size.small)
+
+        lblStar := label.new(startBar, bigHigh + (bigHigh - bigLow) * 0.05,
+                     "★ " + whichMonth,
+                     color=color.new(color.orange, 85),
+                     textcolor=color.orange,
+                     style=label.style_label_right,
+                     size=size.tiny)
+
+        lblUp   := label.new(startBar + 5, bigHigh - (bigHigh - bigMid) * 0.5,
+                     "upper zone",
+                     color=color.new(color.orange, 100),
+                     textcolor=color.new(color.orange, 20),
+                     style=label.style_label_right,
+                     size=size.tiny)
+
+        lblDn   := label.new(startBar + 5, bigMid - (bigMid - bigLow) * 0.5,
+                     "lower zone",
+                     color=color.new(color.blue, 100),
+                     textcolor=color.new(color.blue, 20),
+                     style=label.style_label_right,
+                     size=size.tiny)
