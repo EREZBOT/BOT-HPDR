@@ -1,66 +1,26 @@
-// HPDR Bot v4 - Gate.io Integration Fixed
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
-const GATE_API_KEY = process.env.GATE_API_KEY;
-const GATE_SECRET = process.env.GATE_SECRET;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-
 import crypto from 'crypto';
 
-const EQUITY = 1000; // Paper mode equity fixed at $1000
-const RISK_PCT = 0.05; // 5% risk per trade
-const SL_PCT = 0.03; // 3% stop loss
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-function gateSignature(method, path, queryString, body, timestamp) {
-  const hashedBody = crypto.createHash('sha512').update(body || '').digest('hex');
-  const msg = `${method}\n${path}\n${queryString}\n${hashedBody}\n${timestamp}`;
-  return crypto.createHmac('sha512', GATE_SECRET).update(msg).digest('hex');
+const EQUITY = 1000;
+const RISK_PCT = 0.10;
+const LEVERAGE = 25;
+
+function toGateContract(symbol) {
+  const s = symbol.toUpperCase().replace(/\.P$/, '').replace(/PERP$/, '');
+  if (s.endsWith('_USDT')) return s;
+  if (s.endsWith('USDT')) return s.slice(0, -4) + '_USDT';
+  return s;
 }
 
 async function getPrice(contract) {
-  const res = await fetch(`https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`);
+  const res = await fetch(
+    `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
+  );
   const data = await res.json();
   return parseFloat(data[0]?.last || 0);
-}
-
-async function getBalance() {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const path = '/api/v4/futures/usdt/accounts';
-  const sign = gateSignature('GET', path, '', '', timestamp);
-  const res = await fetch(`https://api.gateio.ws${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'KEY': GATE_API_KEY,
-      'SIGN': sign,
-      'Timestamp': timestamp,
-    }
-  });
-  const data = await res.json();
-  return parseFloat(data?.available || EQUITY);
-}
-
-async function openGateTrade(contract, isLong, size) {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const path = '/api/v4/futures/usdt/orders';
-  const body = JSON.stringify({
-    contract,
-    size: isLong ? size : -size,
-    price: '0',
-    tif: 'ioc',
-    text: 'hpdr-bot',
-  });
-  const sign = gateSignature('POST', path, '', body, timestamp);
-  const res = await fetch(`https://api.gateio.ws${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'KEY': GATE_API_KEY,
-      'SIGN': sign,
-      'Timestamp': timestamp,
-    },
-    body,
-  });
-  return res.json();
 }
 
 async function saveTrade(trade) {
@@ -88,55 +48,76 @@ async function hasOpenTrade(contract) {
     }
   );
   const data = await res.json();
-  return data.length > 0;
+  return Array.isArray(data) && data.length > 0;
 }
 
 export async function POST(req) {
   try {
+    // Webhook secret validation
+    if (WEBHOOK_SECRET) {
+      const incoming = req.headers.get('x-webhook-secret');
+      if (incoming !== WEBHOOK_SECRET) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
+
     const body = await req.json();
-    const { action, symbol, sl_pct, price } = body;
+    const { action, symbol, sl_pct, price, tp1_price, tp2_price } = body;
 
     if (!action || !symbol) {
       return Response.json({ error: 'Missing action or symbol' }, { status: 400 });
     }
+    if (!['long', 'short'].includes(action)) {
+      return Response.json({ error: 'Invalid action' }, { status: 400 });
+    }
 
-    // Convert TradingView symbol to Gate.io format
-    const contract = symbol
-      .replace('USDT.P', '_USDT')
-      .replace('USDT', '_USDT')
-      .replace('.P', '')
-      .replace('PERP', '')
-      .toUpperCase();
+    const contract = toGateContract(symbol);
 
-    // Prevent duplicate trades
     const alreadyOpen = await hasOpenTrade(contract);
     if (alreadyOpen) {
       return Response.json({ error: `Trade already open for ${contract}` }, { status: 409 });
     }
 
     const currentPrice = price ? parseFloat(price) : await getPrice(contract);
-    const isLong = action === 'long';
-    const slPct = sl_pct || SL_PCT * 100;
+    if (!currentPrice) {
+      return Response.json({ error: 'Could not determine entry price' }, { status: 500 });
+    }
 
-    // Calculate position size based on risk
+    const isLong = action === 'long';
+    const slPct = parseFloat(sl_pct) || 2.5;
+
+    // Paper mode position size: risk 10% of $1000 with x25 leverage
+    // riskAmount = $100, positionValue = riskAmount / slPct% * leverage
     const riskAmount = EQUITY * RISK_PCT;
-    const slDistance = currentPrice * (slPct / 100);
-    const positionValue = riskAmount / (slPct / 100) * 30; // x30 leverage
+    const positionValue = (riskAmount / (slPct / 100)) * LEVERAGE;
     const size = Math.max(1, Math.floor(positionValue / currentPrice));
 
     const slPrice = isLong
       ? currentPrice * (1 - slPct / 100)
       : currentPrice * (1 + slPct / 100);
 
-    const gateResult = await openGateTrade(contract, isLong, size);
-    console.log('Gate.io result:', JSON.stringify(gateResult));
+    // TP levels: use provided values or percentage-based fallbacks
+    const tp1 = tp1_price
+      ? parseFloat(tp1_price)
+      : isLong
+        ? currentPrice * (1 + slPct / 100)
+        : currentPrice * (1 - slPct / 100);
 
+    const tp2 = tp2_price
+      ? parseFloat(tp2_price)
+      : isLong
+        ? currentPrice * (1 + (slPct / 100) * 2)
+        : currentPrice * (1 - (slPct / 100) * 2);
+
+    // Paper mode — no real Gate.io order execution
     const trade = {
       contract,
       direction: action,
       entry_price: currentPrice,
       size,
       sl_price: slPrice,
+      tp1_price: tp1,
+      tp2_price: tp2,
       current_price: currentPrice,
       status: 'open',
       stage: 0,
@@ -145,9 +126,11 @@ export async function POST(req) {
     };
 
     const saved = await saveTrade(trade);
-    return Response.json({ success: true, trade: saved, gate: gateResult });
+    console.log(`[HPDR] New trade: ${action.toUpperCase()} ${contract} @ ${currentPrice}`);
+    return Response.json({ success: true, trade: saved });
 
   } catch (err) {
+    console.error('[HPDR] Webhook error:', err.message);
     return Response.json({ error: err.message }, { status: 500 });
   }
 }
