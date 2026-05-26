@@ -38,7 +38,7 @@ async function updateTrade(id, updates) {
   });
 }
 
-async function closeTrade(id, exitPrice, closeReason) {
+async function closeTrade(id, exitPrice, closeReason, pnlUsdt, pnlPct) {
   await fetch(`${SUPABASE_URL}/rest/v1/trades?id=eq.${id}`, {
     method: 'PATCH',
     headers: {
@@ -50,6 +50,9 @@ async function closeTrade(id, exitPrice, closeReason) {
       status: 'closed',
       exit_price: exitPrice,
       close_reason: closeReason,
+      pnl_usdt: pnlUsdt,
+      pnl_pct: pnlPct,
+      current_price: exitPrice,
       closed_at: new Date().toISOString(),
     }),
   });
@@ -80,13 +83,14 @@ export async function GET() {
         : (entry - price) * trade.size;
       const pnlPct = (pnlUsdt / EQUITY) * 100;
 
-      // Stop loss hit
+      // Stop loss hit — exit at SL price (paper mode fills at exact SL)
       if ((isLong && price <= sl) || (!isLong && price >= sl)) {
         const slPnl = isLong
           ? (sl - entry) * trade.size
           : (entry - sl) * trade.size;
-        await closeTrade(trade.id, price, 'sl');
-        console.log(`[HPDR] SL hit: ${trade.contract} @ ${price}, PnL: ${slPnl.toFixed(2)}`);
+        const slPct = (slPnl / EQUITY) * 100;
+        await closeTrade(trade.id, sl, 'sl', slPnl, slPct);
+        console.log(`[HPDR] SL hit: ${trade.contract} @ ${sl}, PnL: ${slPnl.toFixed(2)}`);
         updated++;
         continue;
       }
@@ -112,7 +116,7 @@ export async function GET() {
       if (stage >= 1 && trade.tp2_price) {
         const tp2 = parseFloat(trade.tp2_price);
         if ((isLong && price >= tp2) || (!isLong && price <= tp2)) {
-          await closeTrade(trade.id, price, 'tp2');
+          await closeTrade(trade.id, price, 'tp2', pnlUsdt, pnlPct);
           console.log(`[HPDR] TP2 hit: ${trade.contract} @ ${price}, PnL: ${pnlUsdt.toFixed(2)}`);
           updated++;
           continue;

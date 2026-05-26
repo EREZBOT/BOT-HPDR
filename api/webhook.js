@@ -1,5 +1,3 @@
-import crypto from 'crypto';
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
