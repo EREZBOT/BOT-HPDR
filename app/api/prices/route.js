@@ -1,17 +1,14 @@
 export async function GET(req) {
   try {
-    // Handle both absolute URLs (Edge runtime) and relative paths (Node.js runtime)
-    const rawUrl = req.url || '';
-    const url = new URL(rawUrl.startsWith('http') ? rawUrl : `http://localhost${rawUrl}`);
-    const contracts = (url.searchParams.get('contracts') || '')
-      .split(',').map(s => s.trim()).filter(Boolean);
+    const contracts = new URL(req.url).searchParams.get('contracts') || '';
+    const list = contracts.split(',').map(s => s.trim()).filter(Boolean);
 
-    if (contracts.length === 0) {
+    if (list.length === 0) {
       return Response.json({}, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     const prices = {};
-    await Promise.all(contracts.map(async (contract) => {
+    await Promise.all(list.map(async (contract) => {
       try {
         const res = await fetch(
           `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`

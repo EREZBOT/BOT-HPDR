@@ -51,12 +51,9 @@ async function hasOpenTrade(contract) {
 
 export async function POST(req) {
   try {
-    // Webhook secret validation — accepts header or query param (TradingView uses query param)
     if (WEBHOOK_SECRET) {
       const fromHeader = req.headers.get('x-webhook-secret');
-      const rawUrl = req.url || '';
-      const url = new URL(rawUrl.startsWith('http') ? rawUrl : `http://localhost${rawUrl}`);
-      const fromQuery = url.searchParams.get('secret');
+      const fromQuery = new URL(req.url).searchParams.get('secret');
       if (fromHeader !== WEBHOOK_SECRET && fromQuery !== WEBHOOK_SECRET) {
         return Response.json({ error: 'Unauthorized' }, { status: 401 });
       }
@@ -87,8 +84,6 @@ export async function POST(req) {
     const isLong = action === 'long';
     const slPct = parseFloat(sl_pct) || 2.5;
 
-    // Paper mode position size: risk 10% of $1000 with x25 leverage
-    // riskAmount = $100, positionValue = riskAmount / slPct% * leverage
     const riskAmount = EQUITY * RISK_PCT;
     const positionValue = (riskAmount / (slPct / 100)) * LEVERAGE;
     const size = Math.max(1, Math.floor(positionValue / currentPrice));
@@ -97,7 +92,6 @@ export async function POST(req) {
       ? currentPrice * (1 - slPct / 100)
       : currentPrice * (1 + slPct / 100);
 
-    // TP levels: use provided values or percentage-based fallbacks
     const tp1 = tp1_price
       ? parseFloat(tp1_price)
       : isLong
@@ -110,7 +104,6 @@ export async function POST(req) {
         ? currentPrice * (1 + (slPct / 100) * 2)
         : currentPrice * (1 - (slPct / 100) * 2);
 
-    // Paper mode — no real Gate.io order execution
     const trade = {
       contract,
       direction: action,

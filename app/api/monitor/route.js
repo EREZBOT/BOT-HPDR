@@ -77,17 +77,14 @@ export async function GET() {
       const sl = parseFloat(trade.sl_price);
       const stage = trade.stage ?? 0;
 
-      // PnL based on actual position size (paper mode)
       const pnlUsdt = isLong
         ? (price - entry) * trade.size
         : (entry - price) * trade.size;
       const pnlPct = (pnlUsdt / EQUITY) * 100;
 
-      // Stop loss hit — exit at SL price (paper mode fills at exact SL)
+      // Stop loss hit
       if ((isLong && price <= sl) || (!isLong && price >= sl)) {
-        const slPnl = isLong
-          ? (sl - entry) * trade.size
-          : (entry - sl) * trade.size;
+        const slPnl = isLong ? (sl - entry) * trade.size : (entry - sl) * trade.size;
         const slPct = (slPnl / EQUITY) * 100;
         await closeTrade(trade.id, sl, 'sl', slPnl, slPct);
         console.log(`[HPDR] SL hit: ${trade.contract} @ ${sl}, PnL: ${slPnl.toFixed(2)}`);
@@ -99,13 +96,7 @@ export async function GET() {
       if (stage === 0 && trade.tp1_price) {
         const tp1 = parseFloat(trade.tp1_price);
         if ((isLong && price >= tp1) || (!isLong && price <= tp1)) {
-          await updateTrade(trade.id, {
-            stage: 1,
-            sl_price: entry,
-            current_price: price,
-            pnl_usdt: pnlUsdt,
-            pnl_pct: pnlPct,
-          });
+          await updateTrade(trade.id, { stage: 1, sl_price: entry, current_price: price, pnl_usdt: pnlUsdt, pnl_pct: pnlPct });
           console.log(`[HPDR] TP1 hit: ${trade.contract} @ ${price} — SL moved to break even`);
           updated++;
           continue;
@@ -123,12 +114,7 @@ export async function GET() {
         }
       }
 
-      // Update live price and PnL
-      await updateTrade(trade.id, {
-        current_price: price,
-        pnl_usdt: pnlUsdt,
-        pnl_pct: pnlPct,
-      });
+      await updateTrade(trade.id, { current_price: price, pnl_usdt: pnlUsdt, pnl_pct: pnlPct });
       updated++;
     }
 
