@@ -1,53 +1,89 @@
-# הוראות חיבור TradingView לבוט
+# TradingView → HPDR Bot Setup
 
-## שלב 1 — הוסף Alert ב-TradingView
+## Step 1 — Open the chart
 
-פתח את גרף BTC/USDT.P ב-TradingView עם האינדיקטור HPDR פעיל.
+Open BTCUSDT.P (or ETHUSDT.P) on the Daily timeframe with the HPDR indicator active.
 
-לחץ על פעמון ה-Alert (⏰) ← "Create Alert"
+---
 
-## שלב 2 — הגדרות ה-Alert
+## Step 2 — Create the Alert
 
-**Condition:** HPDR Strategy — Original Method
-**בחר:** "Order fills only" או "alert() function calls only"
+Click the bell icon (⏰) → **Create Alert**
 
-## שלב 3 — הודעת ה-Webhook
+| Setting | Value |
+|---------|-------|
+| Condition | HPDR Strategy — alert() function calls only |
+| Expiration | Open-ended |
+| Alert name | HPDR LONG BTC (or SHORT / ETH) |
 
-בשדה **"Message"** הכנס את הטקסט הבא:
+---
 
-### לסיגנל LONG:
+## Step 3 — Webhook Message
+
+In the **Message** field paste the appropriate JSON:
+
+### LONG signal:
 ```json
-{
-  "action": "long",
-  "symbol": "{{ticker}}",
-  "sl_pct": 2.5
-}
+{"action":"long","symbol":"{{ticker}}","sl_pct":2.5,"price":{{close}}}
 ```
 
-### לסיגנל SHORT:
+### SHORT signal:
 ```json
-{
-  "action": "short", 
-  "symbol": "{{ticker}}",
-  "sl_pct": 2.5
-}
+{"action":"short","symbol":"{{ticker}}","sl_pct":2.5,"price":{{close}}}
 ```
 
-## שלב 4 — כתובת Webhook
-
-בשדה **"Webhook URL"** הכנס:
+### With monthly levels (recommended for accurate TP targets):
+```json
+{"action":"long","symbol":"{{ticker}}","sl_pct":2.5,"price":{{close}},"tp1_price":MONTHLY_MID,"tp2_price":MONTHLY_HIGH}
 ```
-https://YOUR-PROJECT.vercel.app/api/webhook
+```json
+{"action":"short","symbol":"{{ticker}}","sl_pct":2.5,"price":{{close}},"tp1_price":MONTHLY_MID,"tp2_price":MONTHLY_LOW}
 ```
 
-(החלף YOUR-PROJECT בשם הפרויקט שלך ב-Vercel)
+> **Note:** Replace `MONTHLY_MID`, `MONTHLY_HIGH`, `MONTHLY_LOW` with the actual Pine Script variable names from the HPDR indicator (e.g. `{{plot_0}}`).  
+> If omitted, the bot defaults to ±2.5% (TP1) and ±5% (TP2) from entry.
 
-## שלב 5 — חזור על זה עבור ETH
+---
 
-פתח גרף ETH/USDT.P וצור Alert זהה.
+## Step 4 — Webhook URL
 
-## חשוב!
+In the **Webhook URL** field enter:
+```
+https://bot-hpdr.vercel.app/api/webhook
+```
 
-- צריך תוכנית TradingView שתומכת ב-Webhooks (Essential ומעלה)
-- כל מטבע צריך Alert נפרד
-- TradingView שולח את {{ticker}} אוטומטית — לא צריך לשנות
+---
+
+## Step 5 — Add the Secret Header
+
+TradingView does not support custom headers natively, so add the secret as a query parameter instead.  
+In the Webhook URL field use:
+```
+https://bot-hpdr.vercel.app/api/webhook?secret=YOUR_WEBHOOK_SECRET
+```
+
+Then in `api/webhook.js`, the validation also accepts `?secret=` from the query string:
+> The current code checks the `x-webhook-secret` header. If TradingView cannot send headers, update the webhook to also accept a `secret` query param (see note below).
+
+---
+
+## Step 6 — Repeat for each symbol / direction
+
+Create **4 alerts** total:
+
+| Alert | Symbol | Action |
+|-------|--------|--------|
+| HPDR LONG BTC  | BTCUSDT.P | long  |
+| HPDR SHORT BTC | BTCUSDT.P | short |
+| HPDR LONG ETH  | ETHUSDT.P | long  |
+| HPDR SHORT ETH | ETHUSDT.P | short |
+
+---
+
+## Notes
+
+- Requires TradingView **Essential** plan or higher for Webhooks
+- `{{ticker}}` is sent automatically by TradingView — do not change it
+- `{{close}}` is the closing price of the candle — do not change it
+- The bot converts `BTCUSDT.P` → `BTC_USDT` (Gate.io format) automatically
+- Only **one open trade per symbol** is allowed — duplicate signals are rejected

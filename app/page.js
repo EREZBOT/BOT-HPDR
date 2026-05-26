@@ -14,11 +14,13 @@ async function fetchTrades() {
   return res.json();
 }
 
-async function fetchPrice(symbol) {
+async function fetchPrice(contract) {
   try {
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    const res = await fetch(
+      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
+    );
     const data = await res.json();
-    return parseFloat(data.price || 0);
+    return parseFloat(data[0]?.last || 0);
   } catch {
     return 0;
   }
@@ -56,19 +58,18 @@ function PositionCard({ trade, livePrice }) {
   const entry = Number(trade.entry_price);
   const tp1 = Number(trade.tp1_price);
   const tp2 = Number(trade.tp2_price);
-  const tp3 = Number(trade.tp3_price);
   const sl = Number(trade.sl_price);
-  const current = livePrice || entry;
+  const current = livePrice || Number(trade.current_price) || entry;
+  const stage = trade.stage ?? 0;
 
-  const pnlPct = isLong
-    ? ((current - entry) / entry) * 100
-    : ((entry - current) / entry) * 100;
-  const pnlUsdt = pnlPct * entry * Number(trade.size) / 100;
+  const pnlUsdt = isLong
+    ? (current - entry) * Number(trade.size)
+    : (entry - current) * Number(trade.size);
+  const pnlPct = (pnlUsdt / 1000) * 100;
 
   const progress = isLong ? current - entry : entry - current;
   const pct1 = tp1 ? Math.min(100, Math.max(0, Math.round((progress / (tp1 - entry || 1)) * 100))) : 0;
   const pct2 = tp2 ? Math.min(100, Math.max(0, Math.round((progress / (tp2 - entry || 1)) * 100))) : 0;
-  const pct3 = tp3 ? Math.min(100, Math.max(0, Math.round((progress / (tp3 - entry || 1)) * 100))) : 0;
 
   return (
     <div style={{
@@ -90,6 +91,11 @@ function PositionCard({ trade, livePrice }) {
             {isLong ? '▲ LONG' : '▼ SHORT'}
           </span>
           <span style={{ fontSize: 14, fontWeight: 500, color: '#e8e8f0' }}>{trade.contract}</span>
+          {stage >= 1 && (
+            <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, background: '#1a1a0e', color: '#ffaa00', border: '0.5px solid #ffaa0044' }}>
+              BE
+            </span>
+          )}
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontSize: 16, fontWeight: 500, fontFamily: 'monospace', color: pnlUsdt >= 0 ? '#00e87a' : '#ff4466' }}>
@@ -105,21 +111,20 @@ function PositionCard({ trade, livePrice }) {
         {[
           ['Entry', `$${fmt(entry)}`],
           ['Current', `$${fmt(current)}`],
-          ['Size', `${trade.size} contracts`],
+          ['Size', `${trade.size} cts`],
           ['Stop loss', `$${fmt(sl)}`],
           ['TP1', `$${fmt(tp1)}`],
           ['TP2', `$${fmt(tp2)}`],
         ].map(([label, val]) => (
           <div key={label}>
             <div style={{ fontSize: 10, color: '#5a5a7a', marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 11, color: label === 'Stop loss' ? '#ff4466' : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466') : '#b0b0cc', fontFamily: 'monospace' }}>{val}</div>
+            <div style={{ fontSize: 11, fontFamily: 'monospace', color: label === 'Stop loss' ? '#ff4466' : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466') : '#b0b0cc' }}>{val}</div>
           </div>
         ))}
       </div>
 
-      <TPBar label="TP1 — 1.5%" price={tp1} pct={Math.min(100, pct1)} color="#00e87a" />
-      <TPBar label="TP2 — 2.5%" price={tp2} pct={Math.min(100, pct2)} color="#3a3a5a" />
-      <TPBar label="TP3 — 4.0%" price={tp3} pct={Math.min(100, pct3)} color="#2a2a4a" />
+      <TPBar label="TP1" price={tp1} pct={Math.min(100, pct1)} color="#00e87a" />
+      <TPBar label="TP2" price={tp2} pct={Math.min(100, pct2)} color="#3a3a5a" />
 
       <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 8, textAlign: 'right' }}>
         Opened {timeAgo(trade.created_at)}
@@ -163,10 +168,10 @@ export default function Dashboard() {
       setTrades(data);
       setLastUpdate(new Date());
       const open = data.filter(t => t.status === 'open');
-      const symbols = [...new Set(open.map(t => t.contract))];
+      const contracts = [...new Set(open.map(t => t.contract))];
       const priceMap = {};
-      await Promise.all(symbols.map(async s => {
-        priceMap[s] = await fetchPrice(s);
+      await Promise.all(contracts.map(async c => {
+        priceMap[c] = await fetchPrice(c);
       }));
       setPrices(priceMap);
     }
@@ -175,20 +180,25 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 30000);
+    const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
   }, []);
 
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
   const wins = closed.filter(t => Number(t.pnl_usdt) > 0);
-  const openPnl = open.reduce((t, trade) => {
+
+  const openPnl = open.reduce((sum, trade) => {
     const entry = Number(trade.entry_price);
-    const current = prices[trade.contract] || entry;
+    const current = prices[trade.contract] || Number(trade.current_price) || entry;
     const isLong = trade.direction === 'long';
-    const pnl = isLong ? (current - entry) * Number(trade.size) : (entry - current) * Number(trade.size);
-    return t + pnl;
+    const pnl = isLong
+      ? (current - entry) * Number(trade.size)
+      : (entry - current) * Number(trade.size);
+    return sum + pnl;
   }, 0);
+
+  const closedPnl = closed.reduce((sum, t) => sum + Number(t.pnl_usdt || 0), 0);
   const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
 
   const s = {
@@ -206,23 +216,26 @@ export default function Dashboard() {
     <div style={s.dash}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
       <div style={s.topbar}>
-        <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
-          HPDR<span style={{ color: '#00e87a' }}>bot</span>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
+            HPDR<span style={{ color: '#00e87a' }}>bot</span>
+          </div>
+          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 Leverage · Gate.io Perpetuals</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00e87a', display: 'inline-block' }} />
-          Live · BTC/USDT Perpetual
+          Live
           {lastUpdate && <span style={{ color: '#5a5a7a', marginLeft: 8 }}>· {timeAgo(lastUpdate.toISOString())}</span>}
         </div>
       </div>
 
       {loading ? (
-        <div style={{ textAlign: 'center', color: '#5a5a7a', marginTop: 60, fontSize: 13 }}>Loading trades...</div>
+        <div style={{ textAlign: 'center', color: '#5a5a7a', marginTop: 60, fontSize: 13 }}>Loading...</div>
       ) : (
         <>
           <div style={s.statRow}>
             {[
-              ['Total trades', closed.length, '#4488ff'],
+              ['Closed trades', closed.length, '#4488ff'],
               ['Win rate', `${winRate}%`, '#00e87a'],
               ['Open now', open.length, '#ffaa00'],
               ['Open P&L', `${openPnl >= 0 ? '+' : ''}$${fmt(openPnl)}`, openPnl >= 0 ? '#00e87a' : '#ff4466'],
@@ -244,7 +257,14 @@ export default function Dashboard() {
           </div>
 
           <div>
-            <div style={s.sectionTitle}>Closed trades ({closed.length})</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+              <div style={s.sectionTitle}>Closed trades ({closed.length})</div>
+              {closed.length > 0 && (
+                <div style={{ fontSize: 11, fontFamily: 'monospace', color: closedPnl >= 0 ? '#00e87a' : '#ff4466' }}>
+                  Total: {closedPnl >= 0 ? '+' : ''}${fmt(closedPnl)}
+                </div>
+              )}
+            </div>
             {closed.length === 0 ? (
               <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No closed trades yet</div>
             ) : (
