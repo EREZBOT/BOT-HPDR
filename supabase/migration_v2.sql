@@ -9,7 +9,11 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS closed_at     TIMESTAMPTZ;
 -- Backfill stage = 0 for existing rows
 UPDATE trades SET stage = 0 WHERE stage IS NULL;
 
--- Verify
+-- Enable Supabase Realtime on trades table
+-- Required for the dashboard to receive instant push updates
+ALTER PUBLICATION supabase_realtime ADD TABLE trades;
+
+-- Verify columns
 SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_name = 'trades'

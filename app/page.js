@@ -1,8 +1,13 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
+import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+const supabase = SUPABASE_URL && SUPABASE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
 
 async function fetchTrades() {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
@@ -11,18 +16,18 @@ async function fetchTrades() {
       Authorization: `Bearer ${SUPABASE_KEY}`,
     },
   });
-  return res.json();
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
-async function fetchPrice(contract) {
+// Server-side proxy — no CORS issues
+async function fetchPrices(contracts) {
+  if (!contracts.length) return {};
   try {
-    const res = await fetch(
-      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
-    );
-    const data = await res.json();
-    return parseFloat(data[0]?.last || 0);
+    const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
+    return await res.json();
   } catch {
-    return 0;
+    return {};
   }
 }
 
@@ -34,20 +39,21 @@ function timeAgo(dateStr) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function fmt(n) {
-  if (n == null) return '—';
-  return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function fmt(n, decimals = 2) {
+  if (n == null || isNaN(Number(n))) return '—';
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 function TPBar({ label, price, pct, color }) {
+  const clamped = Math.min(100, Math.max(0, pct));
   return (
     <div style={{ marginBottom: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#5a5a7a', marginBottom: 3 }}>
         <span>{label} — ${fmt(price)}</span>
-        <span style={{ color: pct > 50 ? '#00e87a' : '#5a5a7a' }}>{pct}%</span>
+        <span style={{ color: clamped > 50 ? '#00e87a' : '#5a5a7a' }}>{clamped}%</span>
       </div>
       <div style={{ height: 4, background: '#1e1e2e', borderRadius: 2, overflow: 'hidden' }}>
-        <div style={{ height: 4, width: `${pct}%`, borderRadius: 2, background: color, transition: 'width 0.8s ease' }} />
+        <div style={{ height: 4, width: `${clamped}%`, borderRadius: 2, background: color, transition: 'width 0.6s ease' }} />
       </div>
     </div>
   );
@@ -56,20 +62,23 @@ function TPBar({ label, price, pct, color }) {
 function PositionCard({ trade, livePrice }) {
   const isLong = trade.direction === 'long';
   const entry = Number(trade.entry_price);
-  const tp1 = Number(trade.tp1_price);
-  const tp2 = Number(trade.tp2_price);
+  const tp1 = Number(trade.tp1_price) || 0;
+  const tp2 = Number(trade.tp2_price) || 0;
   const sl = Number(trade.sl_price);
-  const current = livePrice || Number(trade.current_price) || entry;
+  const size = Number(trade.size);
   const stage = trade.stage ?? 0;
 
-  const pnlUsdt = isLong
-    ? (current - entry) * Number(trade.size)
-    : (entry - current) * Number(trade.size);
+  // Prefer live price, then DB current_price, then entry
+  const current = livePrice || Number(trade.current_price) || entry;
+
+  const pnlUsdt = isLong ? (current - entry) * size : (entry - current) * size;
   const pnlPct = (pnlUsdt / 1000) * 100;
 
   const progress = isLong ? current - entry : entry - current;
-  const pct1 = tp1 ? Math.min(100, Math.max(0, Math.round((progress / (tp1 - entry || 1)) * 100))) : 0;
-  const pct2 = tp2 ? Math.min(100, Math.max(0, Math.round((progress / (tp2 - entry || 1)) * 100))) : 0;
+  const range1 = tp1 - entry || 1;
+  const range2 = tp2 - entry || 1;
+  const pct1 = tp1 ? Math.round((progress / range1) * 100) : 0;
+  const pct2 = tp2 ? Math.round((progress / range2) * 100) : 0;
 
   return (
     <div style={{
@@ -81,7 +90,7 @@ function PositionCard({ trade, livePrice }) {
       marginBottom: 8,
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{
             fontSize: 10, fontWeight: 500, padding: '3px 8px', borderRadius: 4,
             background: isLong ? '#001a0e' : '#1a0008',
@@ -102,7 +111,7 @@ function PositionCard({ trade, livePrice }) {
             {pnlUsdt >= 0 ? '+' : ''}${fmt(pnlUsdt)}
           </div>
           <div style={{ fontSize: 11, color: pnlPct >= 0 ? '#00e87a' : '#ff4466' }}>
-            {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+            {pnlPct >= 0 ? '+' : ''}{fmt(pnlPct)}%
           </div>
         </div>
       </div>
@@ -111,23 +120,29 @@ function PositionCard({ trade, livePrice }) {
         {[
           ['Entry', `$${fmt(entry)}`],
           ['Current', `$${fmt(current)}`],
-          ['Size', `${trade.size} cts`],
+          ['Size', `${size} cts`],
           ['Stop loss', `$${fmt(sl)}`],
-          ['TP1', `$${fmt(tp1)}`],
-          ['TP2', `$${fmt(tp2)}`],
+          ['TP1', tp1 ? `$${fmt(tp1)}` : '—'],
+          ['TP2', tp2 ? `$${fmt(tp2)}` : '—'],
         ].map(([label, val]) => (
           <div key={label}>
             <div style={{ fontSize: 10, color: '#5a5a7a', marginBottom: 2 }}>{label}</div>
-            <div style={{ fontSize: 11, fontFamily: 'monospace', color: label === 'Stop loss' ? '#ff4466' : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466') : '#b0b0cc' }}>{val}</div>
+            <div style={{
+              fontSize: 11, fontFamily: 'monospace',
+              color: label === 'Stop loss' ? '#ff4466'
+                : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466')
+                : '#b0b0cc',
+            }}>{val}</div>
           </div>
         ))}
       </div>
 
-      <TPBar label="TP1" price={tp1} pct={Math.min(100, pct1)} color="#00e87a" />
-      <TPBar label="TP2" price={tp2} pct={Math.min(100, pct2)} color="#3a3a5a" />
+      <TPBar label="TP1" price={tp1} pct={pct1} color="#00e87a" />
+      <TPBar label="TP2" price={tp2} pct={pct2} color="#3a3a5a" />
 
       <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 8, textAlign: 'right' }}>
         Opened {timeAgo(trade.created_at)}
+        {livePrice ? <span style={{ color: '#2a6a4a', marginLeft: 8 }}>● live</span> : null}
       </div>
     </div>
   );
@@ -143,7 +158,9 @@ function HistoryRow({ trade }) {
         {isLong ? '▲ Long' : '▼ Short'}
       </td>
       <td style={{ padding: '8px', color: '#b0b0cc', fontFamily: 'monospace', fontSize: 11 }}>${fmt(trade.entry_price)}</td>
-      <td style={{ padding: '8px', color: '#b0b0cc', fontFamily: 'monospace', fontSize: 11 }}>${fmt(trade.exit_price)}</td>
+      <td style={{ padding: '8px', color: '#b0b0cc', fontFamily: 'monospace', fontSize: 11 }}>
+        {trade.exit_price ? `$${fmt(trade.exit_price)}` : '—'}
+      </td>
       <td style={{ padding: '8px', fontFamily: 'monospace', fontSize: 11, color: pnl >= 0 ? '#00e87a' : '#ff4466' }}>
         {pnl >= 0 ? '+' : ''}${fmt(pnl)}
       </td>
@@ -151,6 +168,9 @@ function HistoryRow({ trade }) {
         <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, background: '#1e1e2e', color: '#7a7aaa' }}>
           {trade.close_reason?.toUpperCase() || '—'}
         </span>
+      </td>
+      <td style={{ padding: '8px', fontSize: 10, color: '#5a5a7a' }}>
+        {trade.closed_at ? timeAgo(trade.closed_at) : '—'}
       </td>
     </tr>
   );
@@ -161,45 +181,63 @@ export default function Dashboard() {
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [realtimeOk, setRealtimeOk] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const data = await fetchTrades();
-    if (Array.isArray(data)) {
-      setTrades(data);
-      setLastUpdate(new Date());
-      const open = data.filter(t => t.status === 'open');
-      const contracts = [...new Set(open.map(t => t.contract))];
-      const priceMap = {};
-      await Promise.all(contracts.map(async c => {
-        priceMap[c] = await fetchPrice(c);
-      }));
+    setTrades(data);
+    setLastUpdate(new Date());
+    setLoading(false);
+
+    const open = data.filter(t => t.status === 'open');
+    const contracts = [...new Set(open.map(t => t.contract))];
+    if (contracts.length > 0) {
+      const priceMap = await fetchPrices(contracts);
       setPrices(priceMap);
     }
-    setLoading(false);
-  };
+  }, []);
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 15000);
-    return () => clearInterval(interval);
-  }, []);
+
+    // Supabase Realtime — fires instantly when monitor updates any trade
+    if (supabase) {
+      const channel = supabase
+        .channel('trades-realtime')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
+          load();
+        })
+        .subscribe((status) => {
+          setRealtimeOk(status === 'SUBSCRIBED');
+        });
+
+      // Fallback polling every 15s (in case realtime is not enabled on table)
+      const poll = setInterval(load, 15000);
+
+      return () => {
+        supabase.removeChannel(channel);
+        clearInterval(poll);
+      };
+    } else {
+      const poll = setInterval(load, 15000);
+      return () => clearInterval(poll);
+    }
+  }, [load]);
 
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
   const wins = closed.filter(t => Number(t.pnl_usdt) > 0);
+  const losses = closed.filter(t => Number(t.pnl_usdt) < 0);
+  const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
 
   const openPnl = open.reduce((sum, trade) => {
     const entry = Number(trade.entry_price);
     const current = prices[trade.contract] || Number(trade.current_price) || entry;
     const isLong = trade.direction === 'long';
-    const pnl = isLong
-      ? (current - entry) * Number(trade.size)
-      : (entry - current) * Number(trade.size);
-    return sum + pnl;
+    return sum + (isLong ? (current - entry) : (entry - current)) * Number(trade.size);
   }, 0);
 
   const closedPnl = closed.reduce((sum, t) => sum + Number(t.pnl_usdt || 0), 0);
-  const winRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : 0;
 
   const s = {
     dash: { background: '#0a0a0f', minHeight: '100vh', padding: 20, fontFamily: "'JetBrains Mono', monospace", color: '#e8e8f0' },
@@ -215,17 +253,22 @@ export default function Dashboard() {
   return (
     <div style={s.dash}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
       <div style={s.topbar}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
             HPDR<span style={{ color: '#00e87a' }}>bot</span>
           </div>
-          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 Leverage · Gate.io Perpetuals</div>
+          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>
+            Paper Mode · x25 · Gate.io Perpetuals
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 }}>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00e87a', display: 'inline-block' }} />
-          Live
-          {lastUpdate && <span style={{ color: '#5a5a7a', marginLeft: 8 }}>· {timeAgo(lastUpdate.toISOString())}</span>}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00e87a', display: 'inline-block', animation: 'pulse 2s infinite' }} />
+            {realtimeOk ? 'Realtime' : 'Polling 15s'}
+            {lastUpdate && <span style={{ color: '#5a5a7a', marginLeft: 6 }}>· {timeAgo(lastUpdate.toISOString())}</span>}
+          </div>
         </div>
       </div>
 
@@ -236,7 +279,7 @@ export default function Dashboard() {
           <div style={s.statRow}>
             {[
               ['Closed trades', closed.length, '#4488ff'],
-              ['Win rate', `${winRate}%`, '#00e87a'],
+              ['Win rate', closed.length > 0 ? `${winRate}%` : '—', winRate >= 50 ? '#00e87a' : '#ff4466'],
               ['Open now', open.length, '#ffaa00'],
               ['Open P&L', `${openPnl >= 0 ? '+' : ''}$${fmt(openPnl)}`, openPnl >= 0 ? '#00e87a' : '#ff4466'],
             ].map(([label, val, color]) => (
@@ -258,7 +301,10 @@ export default function Dashboard() {
 
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
-              <div style={s.sectionTitle}>Closed trades ({closed.length})</div>
+              <div style={s.sectionTitle}>
+                Closed trades ({closed.length})
+                {closed.length > 0 && <span style={{ marginLeft: 12, color: '#5a5a7a' }}>{wins.length}W / {losses.length}L</span>}
+              </div>
               {closed.length > 0 && (
                 <div style={{ fontSize: 11, fontFamily: 'monospace', color: closedPnl >= 0 ? '#00e87a' : '#ff4466' }}>
                   Total: {closedPnl >= 0 ? '+' : ''}${fmt(closedPnl)}
@@ -271,7 +317,7 @@ export default function Dashboard() {
               <table style={s.table}>
                 <thead>
                   <tr>
-                    {['Pair', 'Dir', 'Entry', 'Exit', 'P&L', 'Closed by'].map(h => (
+                    {['Pair', 'Dir', 'Entry', 'Exit', 'P&L', 'Reason', 'Closed'].map(h => (
                       <th key={h} style={s.th}>{h}</th>
                     ))}
                   </tr>
@@ -284,6 +330,13 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
+      `}</style>
     </div>
   );
 }
