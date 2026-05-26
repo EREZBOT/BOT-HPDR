@@ -54,7 +54,9 @@ export async function POST(req) {
     // Webhook secret validation — accepts header or query param (TradingView uses query param)
     if (WEBHOOK_SECRET) {
       const fromHeader = req.headers.get('x-webhook-secret');
-      const fromQuery = new URL(req.url).searchParams.get('secret');
+      const rawUrl = req.url || '';
+      const url = new URL(rawUrl.startsWith('http') ? rawUrl : `http://localhost${rawUrl}`);
+      const fromQuery = url.searchParams.get('secret');
       if (fromHeader !== WEBHOOK_SECRET && fromQuery !== WEBHOOK_SECRET) {
         return Response.json({ error: 'Unauthorized' }, { status: 401 });
       }

@@ -25,7 +25,14 @@ async function fetchPrices(contracts) {
   if (!contracts.length) return {};
   try {
     const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
-    return await res.json();
+    if (!res.ok) return {};
+    const data = await res.json();
+    // Strip error keys, keep only valid numeric prices
+    const prices = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (typeof v === 'number' && v > 0) prices[k] = v;
+    }
+    return prices;
   } catch {
     return {};
   }
@@ -68,8 +75,9 @@ function PositionCard({ trade, livePrice }) {
   const size = Number(trade.size);
   const stage = trade.stage ?? 0;
 
-  // Prefer live price, then DB current_price, then entry
-  const current = livePrice || Number(trade.current_price) || entry;
+  // Prefer live price, then DB current_price (updated by monitor), then entry
+  const dbPrice = Number(trade.current_price);
+  const current = (livePrice > 0) ? livePrice : (dbPrice > 0 ? dbPrice : entry);
 
   const pnlUsdt = isLong ? (current - entry) * size : (entry - current) * size;
   const pnlPct = (pnlUsdt / 1000) * 100;
@@ -232,7 +240,9 @@ export default function Dashboard() {
 
   const openPnl = open.reduce((sum, trade) => {
     const entry = Number(trade.entry_price);
-    const current = prices[trade.contract] || Number(trade.current_price) || entry;
+    const live = prices[trade.contract];
+    const dbPrice = Number(trade.current_price);
+    const current = (live > 0) ? live : (dbPrice > 0 ? dbPrice : entry);
     const isLong = trade.direction === 'long';
     return sum + (isLong ? (current - entry) : (entry - current)) * Number(trade.size);
   }, 0);
