@@ -53,10 +53,11 @@ async function hasOpenTrade(contract) {
 
 export async function POST(req) {
   try {
-    // Webhook secret validation
+    // Webhook secret validation — accepts header or query param (TradingView uses query param)
     if (WEBHOOK_SECRET) {
-      const incoming = req.headers.get('x-webhook-secret');
-      if (incoming !== WEBHOOK_SECRET) {
+      const fromHeader = req.headers.get('x-webhook-secret');
+      const fromQuery = new URL(req.url).searchParams.get('secret');
+      if (fromHeader !== WEBHOOK_SECRET && fromQuery !== WEBHOOK_SECRET) {
         return Response.json({ error: 'Unauthorized' }, { status: 401 });
       }
     }
@@ -136,5 +137,5 @@ export async function POST(req) {
 }
 
 export async function GET() {
-  return Response.json({ error: 'Method not allowed' }, { status: 405 });
+  return Response.json({ status: 'HPDR Bot online', mode: 'paper', version: '2.0' });
 }
