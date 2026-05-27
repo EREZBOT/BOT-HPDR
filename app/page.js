@@ -261,12 +261,13 @@ export default function Dashboard() {
         if (msg.event !== 'update') return;
 
         if (msg.channel === 'futures.book_ticker') {
-          // result is a single object: {contract, b: bid, a: ask}
+          // Gate.io uses 's' for symbol in book_ticker, not 'contract'
           const r = msg.result;
-          if (r?.contract) {
+          const sym = r?.s || r?.contract;
+          if (sym) {
             const bid = parseFloat(r.b);
             const ask = parseFloat(r.a);
-            if (bid > 0 && ask > 0) applyPrices({ [r.contract]: (bid + ask) / 2 });
+            if (bid > 0 && ask > 0) applyPrices({ [sym]: (bid + ask) / 2 });
           }
         }
 
@@ -307,6 +308,10 @@ export default function Dashboard() {
     // (Re)subscribe WebSocket when open contracts change
     const prev = subscribedRef.current.slice().sort().join(',');
     const next = contracts.slice().sort().join(',');
+
+    // Always keep subscribedRef in sync so REST fallback has contracts to poll
+    subscribedRef.current = contracts;
+
     if (next !== prev) connectWs(contracts);
   }, [connectWs]);
 
@@ -322,7 +327,7 @@ export default function Dashboard() {
     // Trade list poll every 30 s
     const tradePoll = setInterval(loadTrades, 30000);
 
-    // REST price fallback every 5 s — guarantees updates even if WS stalls
+    // REST price fallback every 3 s — guarantees updates even if WS stalls
     const pricePoll = setInterval(async () => {
       const contracts = subscribedRef.current;
       if (!contracts.length) return;
@@ -336,7 +341,7 @@ export default function Dashboard() {
         }
         applyPrices(updates);
       } catch {}
-    }, 5000);
+    }, 3000);
 
     return () => {
       channel && supabase?.removeChannel(channel);
