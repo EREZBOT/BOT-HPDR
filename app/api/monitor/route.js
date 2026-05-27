@@ -92,18 +92,34 @@ export async function GET() {
         continue;
       }
 
-      // TP1 — move SL to break even
+      // TP1 — close 50% of position, move SL to break even
       if (stage === 0 && trade.tp1_price) {
         const tp1 = parseFloat(trade.tp1_price);
         if ((isLong && price >= tp1) || (!isLong && price <= tp1)) {
-          await updateTrade(trade.id, { stage: 1, sl_price: entry, current_price: price, pnl_usdt: pnlUsdt, pnl_pct: pnlPct });
-          console.log(`[HPDR] TP1 hit: ${trade.contract} @ ${price} — SL moved to break even`);
+          const halfSize = Math.floor(trade.size / 2) || 1;
+          const tp1Pnl = isLong
+            ? (tp1 - entry) * halfSize
+            : (entry - tp1) * halfSize;
+          const remainingSize = trade.size - halfSize;
+          const remainingPnl = isLong
+            ? (price - entry) * remainingSize
+            : (entry - price) * remainingSize;
+          const totalPnl = tp1Pnl + remainingPnl;
+          await updateTrade(trade.id, {
+            stage: 1,
+            size: remainingSize,
+            sl_price: entry,
+            current_price: price,
+            pnl_usdt: totalPnl,
+            pnl_pct: (totalPnl / EQUITY) * 100,
+          });
+          console.log(`[HPDR] TP1 hit: ${trade.contract} @ ${tp1} — 50% closed, SL → BE, remaining: ${remainingSize} cts`);
           updated++;
           continue;
         }
       }
 
-      // TP2 — full close
+      // TP2 — close remaining position
       if (stage >= 1 && trade.tp2_price) {
         const tp2 = parseFloat(trade.tp2_price);
         if ((isLong && price >= tp2) || (!isLong && price <= tp2)) {

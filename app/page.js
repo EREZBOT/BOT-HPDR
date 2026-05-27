@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, memo } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -46,7 +46,16 @@ function TPBar({ label, price, pct, color }) {
   );
 }
 
-function PositionCard({ trade, livePrice }) {
+async function manualClose(id) {
+  const res = await fetch('/api/close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  return res.json();
+}
+
+function PositionCard({ trade, livePrice, onClose }) {
   const isLong = trade.direction === 'long';
   const entry = Number(trade.entry_price);
   const tp1 = Number(trade.tp1_price) || 0;
@@ -55,9 +64,18 @@ function PositionCard({ trade, livePrice }) {
   const size = Number(trade.size);
   const stage = trade.stage ?? 0;
 
+  const [closing, setClosing] = useState(false);
   const dbPrice = Number(trade.current_price);
   const current = (livePrice > 0) ? livePrice : (dbPrice > 0 ? dbPrice : entry);
   const isLive = livePrice > 0;
+
+  const handleClose = async () => {
+    if (!confirm(`Close ${trade.contract} ${trade.direction.toUpperCase()} at $${fmt(current)}?`)) return;
+    setClosing(true);
+    const res = await manualClose(trade.id);
+    if (res.error) { alert(`Error: ${res.error}`); setClosing(false); }
+    else onClose();
+  };
 
   const pnlUsdt = isLong ? (current - entry) * size : (entry - current) * size;
   const pnlPct = (pnlUsdt / 1000) * 100;
@@ -127,8 +145,19 @@ function PositionCard({ trade, livePrice }) {
       <TPBar label="TP1" price={tp1} pct={pct1} color="#00e87a" />
       <TPBar label="TP2" price={tp2} pct={pct2} color="#3a3a5a" />
 
-      <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 8, textAlign: 'right' }}>
-        Opened {timeAgo(trade.created_at)}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+        <div style={{ fontSize: 10, color: '#5a5a7a' }}>Opened {timeAgo(trade.created_at)}</div>
+        <button
+          onClick={handleClose}
+          disabled={closing}
+          style={{
+            fontSize: 10, padding: '4px 12px', borderRadius: 4, cursor: closing ? 'not-allowed' : 'pointer',
+            background: 'transparent', border: '0.5px solid #ff446688',
+            color: closing ? '#5a5a7a' : '#ff4466', opacity: closing ? 0.5 : 1,
+          }}
+        >
+          {closing ? 'Closing…' : 'Close position'}
+        </button>
       </div>
     </div>
   );
@@ -278,6 +307,8 @@ export default function Dashboard() {
 
   // ── Derived stats ──────────────────────────────────────────────────────────
 
+  const EQUITY_START = 1000;
+
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
   const wins = closed.filter(t => Number(t.pnl_usdt) > 0);
@@ -294,6 +325,14 @@ export default function Dashboard() {
   }, 0);
 
   const closedPnl = closed.reduce((sum, t) => sum + Number(t.pnl_usdt || 0), 0);
+  const equity = EQUITY_START + closedPnl + openPnl;
+
+  const avgWin = wins.length > 0
+    ? wins.reduce((s, t) => s + Number(t.pnl_usdt), 0) / wins.length : 0;
+  const avgLoss = losses.length > 0
+    ? losses.reduce((s, t) => s + Number(t.pnl_usdt), 0) / losses.length : 0;
+  const profitFactor = avgLoss !== 0
+    ? Math.abs(avgWin * wins.length) / Math.abs(avgLoss * losses.length) : null;
 
   const wsColor = wsStatus === 'connected' ? '#00e87a' : wsStatus === 'error' ? '#ff4466' : '#ffaa00';
   const wsLabel = wsStatus === 'connected' ? 'WS Live' : wsStatus === 'error' ? 'WS Error' : 'WS Connecting…';
@@ -336,17 +375,32 @@ export default function Dashboard() {
         <div style={{ textAlign: 'center', color: '#5a5a7a', marginTop: 60, fontSize: 13 }}>Loading...</div>
       ) : (
         <>
-          {/* Stats */}
-          <div style={s.statRow}>
+          {/* Stats row 1 — equity */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 10 }}>
             {[
-              ['Closed trades', closed.length, '#4488ff'],
-              ['Win rate', closed.length > 0 ? `${winRate}%` : '—', winRate >= 50 ? '#00e87a' : '#ff4466'],
-              ['Open now', open.length, '#ffaa00'],
+              ['Equity', `$${fmt(equity)}`, equity >= EQUITY_START ? '#00e87a' : '#ff4466'],
+              ['Closed P&L', `${closedPnl >= 0 ? '+' : ''}$${fmt(closedPnl)}`, closedPnl >= 0 ? '#00e87a' : '#ff4466'],
               ['Open P&L', `${openPnl >= 0 ? '+' : ''}$${fmt(openPnl)}`, openPnl >= 0 ? '#00e87a' : '#ff4466'],
+              ['Open now', open.length, '#ffaa00'],
             ].map(([label, val, color]) => (
               <div key={label} style={s.stat}>
                 <div style={s.statLabel}>{label}</div>
                 <div style={{ fontSize: 22, fontWeight: 500, color }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Stats row 2 — performance */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 }}>
+            {[
+              ['Win rate', closed.length > 0 ? `${winRate}%` : '—', winRate >= 50 ? '#00e87a' : closed.length > 0 ? '#ff4466' : '#5a5a7a'],
+              ['Trades', `${wins.length}W / ${losses.length}L`, '#4488ff'],
+              ['Avg win', wins.length > 0 ? `+$${fmt(avgWin)}` : '—', '#00e87a'],
+              ['Profit factor', profitFactor != null ? fmt(profitFactor) : '—', profitFactor != null && profitFactor >= 1 ? '#00e87a' : '#5a5a7a'],
+            ].map(([label, val, color]) => (
+              <div key={label} style={{ ...s.stat, padding: 10 }}>
+                <div style={s.statLabel}>{label}</div>
+                <div style={{ fontSize: 16, fontWeight: 500, color }}>{val}</div>
               </div>
             ))}
           </div>
@@ -356,7 +410,7 @@ export default function Dashboard() {
             <div style={s.sectionTitle}>Open positions ({open.length})</div>
             {open.length === 0
               ? <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
-              : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} />)
+              : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} onClose={loadTrades} />)
             }
           </div>
 
