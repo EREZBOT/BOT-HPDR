@@ -5,6 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const GATE_WS_URL = 'wss://fx-ws.gateio.ws/v4/ws/usdt';
+const EQUITY_START = 1000;
 
 const supabase = SUPABASE_URL && SUPABASE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -69,6 +70,17 @@ function PositionCard({ trade, livePrice, onClose }) {
   const current = (livePrice > 0) ? livePrice : (dbPrice > 0 ? dbPrice : entry);
   const isLive = livePrice > 0;
 
+  const [flash, setFlash] = useState(false);
+  const prevPrice = useRef(current);
+  useEffect(() => {
+    if (current !== prevPrice.current) {
+      prevPrice.current = current;
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 350);
+      return () => clearTimeout(t);
+    }
+  }, [current]);
+
   const handleClose = async () => {
     if (!confirm(`Close ${trade.contract} ${trade.direction.toUpperCase()} at $${fmt(current)}?`)) return;
     setClosing(true);
@@ -124,7 +136,7 @@ function PositionCard({ trade, livePrice, onClose }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginBottom: 12 }}>
         {[
           ['Entry', `$${fmt(entry)}`],
-          ['Current', `$${fmt(current)}`],
+          ['Current', current],
           ['Size', `${size} cts`],
           ['Stop loss', `$${fmt(sl)}`],
           ['TP1', tp1 ? `$${fmt(tp1)}` : '—'],
@@ -137,7 +149,11 @@ function PositionCard({ trade, livePrice, onClose }) {
               color: label === 'Stop loss' ? '#ff4466'
                 : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466')
                 : '#b0b0cc',
-            }}>{val}</div>
+            }}>
+              {label === 'Current'
+                ? <span style={{ transition: 'opacity 0.35s', opacity: flash ? 0.4 : 1 }}>${fmt(val)}</span>
+                : val}
+            </div>
           </div>
         ))}
       </div>
@@ -205,12 +221,17 @@ export default function Dashboard() {
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
 
+  const applyPrices = useCallback((updates) => {
+    if (!updates || !Object.keys(updates).length) return;
+    setPrices(prev => ({ ...prev, ...updates }));
+    setLastTick(new Date());
+  }, []);
+
   const connectWs = useCallback((contracts) => {
     if (!contracts.length) return;
 
-    // Close previous connection cleanly
     if (wsRef.current) {
-      wsRef.current.onclose = null; // prevent reconnect loop on intentional close
+      wsRef.current.onclose = null;
       wsRef.current.close();
     }
     clearInterval(pingRef.current);
@@ -222,13 +243,11 @@ export default function Dashboard() {
 
     ws.onopen = () => {
       setWsStatus('connected');
-      ws.send(JSON.stringify({
-        time: Math.floor(Date.now() / 1000),
-        channel: 'futures.tickers',
-        event: 'subscribe',
-        payload: contracts,
-      }));
-      // Keep-alive ping every 10 s
+      const t = Math.floor(Date.now() / 1000);
+      // book_ticker: fires on every bid/ask change — most real-time
+      ws.send(JSON.stringify({ time: t, channel: 'futures.book_ticker', event: 'subscribe', payload: contracts }));
+      // tickers: sends last price on any trade — backup
+      ws.send(JSON.stringify({ time: t, channel: 'futures.tickers', event: 'subscribe', payload: contracts }));
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: 'futures.ping' }));
@@ -239,17 +258,28 @@ export default function Dashboard() {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
-        if (msg.channel === 'futures.tickers' && msg.event === 'update') {
+        if (msg.event !== 'update') return;
+
+        if (msg.channel === 'futures.book_ticker') {
+          // result is a single object: {contract, b: bid, a: ask}
+          const r = msg.result;
+          if (r?.contract) {
+            const bid = parseFloat(r.b);
+            const ask = parseFloat(r.a);
+            if (bid > 0 && ask > 0) applyPrices({ [r.contract]: (bid + ask) / 2 });
+          }
+        }
+
+        if (msg.channel === 'futures.tickers') {
+          // result is an array of ticker objects with .last
           const tickers = Array.isArray(msg.result) ? msg.result : [msg.result];
-          setPrices(prev => {
-            const next = { ...prev };
-            for (const t of tickers) {
-              const p = parseFloat(t.last);
-              if (t.contract && !isNaN(p) && p > 0) next[t.contract] = p;
-            }
-            return next;
-          });
-          setLastTick(new Date());
+          const updates = {};
+          for (const t of tickers) {
+            if (!t?.contract) continue;
+            const p = parseFloat(t.last);
+            if (p > 0) updates[t.contract] = p;
+          }
+          applyPrices(updates);
         }
       } catch {}
     };
@@ -259,12 +289,11 @@ export default function Dashboard() {
     ws.onclose = () => {
       setWsStatus('disconnected');
       clearInterval(pingRef.current);
-      // Reconnect after 3 s
       reconnectRef.current = setTimeout(() => {
         if (subscribedRef.current.length > 0) connectWs(subscribedRef.current);
       }, 3000);
     };
-  }, []);
+  }, [applyPrices]);
 
   // ── Trade data ─────────────────────────────────────────────────────────────
 
@@ -290,12 +319,29 @@ export default function Dashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, loadTrades)
       .subscribe();
 
-    // Fallback poll every 30 s for trade list (WS handles prices)
-    const poll = setInterval(loadTrades, 30000);
+    // Trade list poll every 30 s
+    const tradePoll = setInterval(loadTrades, 30000);
+
+    // REST price fallback every 5 s — guarantees updates even if WS stalls
+    const pricePoll = setInterval(async () => {
+      const contracts = subscribedRef.current;
+      if (!contracts.length) return;
+      try {
+        const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const updates = {};
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'number' && v > 0) updates[k] = v;
+        }
+        applyPrices(updates);
+      } catch {}
+    }, 5000);
 
     return () => {
       channel && supabase?.removeChannel(channel);
-      clearInterval(poll);
+      clearInterval(tradePoll);
+      clearInterval(pricePoll);
       clearInterval(pingRef.current);
       clearTimeout(reconnectRef.current);
       if (wsRef.current) {
@@ -303,11 +349,9 @@ export default function Dashboard() {
         wsRef.current.close();
       }
     };
-  }, [loadTrades]);
+  }, [loadTrades, applyPrices]);
 
   // ── Derived stats ──────────────────────────────────────────────────────────
-
-  const EQUITY_START = 1000;
 
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
