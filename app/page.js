@@ -1,26 +1,20 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const EQUITY_START = 1000;
-
-const supabase = SUPABASE_URL && SUPABASE_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_KEY)
-  : null;
 
 async function fetchTrades() {
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    });
+    const res = await fetch('/api/trades');
     const data = await res.json();
-    console.log('[supabase] fetchTrades status:', res.status, 'rows:', Array.isArray(data) ? data.length : data);
+    if (!res.ok) {
+      // data has shape { error, supabase_url_set, supabase_key_set }
+      return { error: data.error || `HTTP ${res.status}`, supabase_url_set: data.supabase_url_set, supabase_key_set: data.supabase_key_set };
+    }
     return Array.isArray(data) ? data : [];
   } catch (err) {
-    console.error('[supabase] fetchTrades error:', err.message);
-    return [];
+    console.error('[fetchTrades] error:', err.message);
+    return { error: err.message };
   }
 }
 
@@ -217,6 +211,9 @@ export default function Dashboard() {
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [lastTick, setLastTick] = useState(null);
+  const [tradesError, setTradesError] = useState(null);
+  const [tradesStatus, setTradesStatus] = useState(null); // { count, ts }
+  const [pricesStatus, setPricesStatus] = useState(null); // { result, ts, ok }
 
   // Ref always holds the latest trades so the price interval never goes stale
   const tradesRef = useRef([]);
@@ -224,28 +221,33 @@ export default function Dashboard() {
   useEffect(() => {
     async function load() {
       const data = await fetchTrades();
+      if (data && !Array.isArray(data) && data.error) {
+        setTradesError(data.error);
+        setTradesStatus({ count: null, ts: new Date(), ok: false });
+        setLoading(false);
+        return;
+      }
       tradesRef.current = data;
       setTrades(data);
+      setTradesError(null);
+      setTradesStatus({ count: data.length, ts: new Date(), ok: true });
       setLoading(false);
     }
 
     load();
 
-    // Supabase Realtime — reload trades on any DB change
-    const channel = supabase
-      ?.channel('trades-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, async () => {
-        const data = await fetchTrades();
-        tradesRef.current = data;
-        setTrades(data);
-      })
-      .subscribe();
-
-    // Trade list poll every 30 s as fallback
+    // Trade list poll every 30 s
     const tradePoll = setInterval(async () => {
       const data = await fetchTrades();
+      if (data && !Array.isArray(data) && data.error) {
+        setTradesError(data.error);
+        setTradesStatus({ count: null, ts: new Date(), ok: false });
+        return;
+      }
       tradesRef.current = data;
       setTrades(data);
+      setTradesError(null);
+      setTradesStatus({ count: data.length, ts: new Date(), ok: true });
     }, 30000);
 
     // Price poll every 2 s — reads tradesRef so it's never stale
@@ -262,7 +264,10 @@ export default function Dashboard() {
         const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
         const data = await res.json();
         console.log('[prices] status:', res.status, 'data:', data);
-        if (!res.ok) return;
+        if (!res.ok) {
+          setPricesStatus({ result: `HTTP ${res.status}`, ts: new Date(), ok: false });
+          return;
+        }
         const updates = {};
         for (const [k, v] of Object.entries(data)) {
           if (typeof v === 'number' && v > 0) updates[k] = v;
@@ -271,14 +276,17 @@ export default function Dashboard() {
         if (Object.keys(updates).length) {
           setPrices(prev => ({ ...prev, ...updates }));
           setLastTick(new Date());
+          setPricesStatus({ result: `${data._source || 'ok'} · ${contracts.length} contract(s)`, ts: new Date(), ok: true });
+        } else {
+          setPricesStatus({ result: `no prices (src: ${data._source || '?'})`, ts: new Date(), ok: false });
         }
       } catch (err) {
         console.error('[prices] fetch error:', err.message);
+        setPricesStatus({ result: err.message, ts: new Date(), ok: false });
       }
     }, 2000);
 
     return () => {
-      channel && supabase?.removeChannel(channel);
       clearInterval(tradePoll);
       clearInterval(pricePoll);
     };
@@ -328,7 +336,7 @@ export default function Dashboard() {
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
       {/* Top bar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, paddingBottom: 16, borderBottom: '0.5px solid #1e1e2e' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingBottom: 16, borderBottom: '0.5px solid #1e1e2e' }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
             HPDR<span style={{ color: '#00e87a' }}>bot</span>
@@ -341,8 +349,46 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Status strip */}
+      <div style={{
+        display: 'flex', gap: 16, marginBottom: 16,
+        fontSize: 10, fontFamily: 'monospace',
+        background: '#0d0d1a', border: '0.5px solid #1e1e2e',
+        borderRadius: 6, padding: '6px 12px',
+      }}>
+        <span style={{ color: '#5a5a7a' }}>TRADES</span>
+        {tradesStatus ? (
+          <span style={{ color: tradesStatus.ok ? '#00e87a' : '#ffaa00' }}>
+            {tradesStatus.ok ? `${tradesStatus.count} rows` : 'error'} · {timeAgo(tradesStatus.ts.toISOString())}
+          </span>
+        ) : (
+          <span style={{ color: '#ffaa00' }}>loading…</span>
+        )}
+        <span style={{ color: '#1e1e2e' }}>|</span>
+        <span style={{ color: '#5a5a7a' }}>PRICES</span>
+        {pricesStatus ? (
+          <span style={{ color: pricesStatus.ok ? '#00e87a' : '#ffaa00' }}>
+            {pricesStatus.result} · {timeAgo(pricesStatus.ts.toISOString())}
+          </span>
+        ) : (
+          <span style={{ color: '#ffaa00' }}>waiting…</span>
+        )}
+      </div>
+
       {loading ? (
         <div style={{ textAlign: 'center', color: '#5a5a7a', marginTop: 60, fontSize: 13 }}>Loading...</div>
+      ) : tradesError ? (
+        <div style={{
+          marginTop: 40, padding: 20, borderRadius: 8,
+          background: '#1a0008', border: '0.5px solid #ff446644',
+          color: '#ff4466', fontSize: 12, fontFamily: 'monospace',
+        }}>
+          <div style={{ fontWeight: 500, marginBottom: 8 }}>Failed to load trades</div>
+          <div style={{ color: '#ff7799' }}>{tradesError}</div>
+          <div style={{ marginTop: 12, color: '#5a5a7a', fontSize: 10 }}>
+            Check that SUPABASE_URL and SUPABASE_SECRET_KEY are set in Vercel environment variables.
+          </div>
+        </div>
       ) : (
         <>
           {/* Stats row 1 — equity */}
@@ -382,8 +428,10 @@ export default function Dashboard() {
               ? <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
               : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} onClose={async () => {
                   const data = await fetchTrades();
-                  tradesRef.current = data;
-                  setTrades(data);
+                  if (Array.isArray(data)) {
+                    tradesRef.current = data;
+                    setTrades(data);
+                  }
                 }} />)
             }
           </div>
