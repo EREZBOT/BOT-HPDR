@@ -4,27 +4,56 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const EQUITY = 1000;
+// Process at most 30 trades per cron run to avoid Vercel function timeout
+const BATCH_LIMIT = 30;
 
-async function getCurrentPrice(contract) {
+// Fetch price from Gate.io with Binance fallback
+async function fetchPrice(contract) {
+  // Gate.io
   try {
     const res = await fetch(
-      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
+      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`,
+      { signal: AbortSignal.timeout(5000) }
     );
     const data = await res.json();
-    return parseFloat(data[0]?.last || 0);
-  } catch (err) {
-    console.error(`[HPDR] Price fetch error for ${contract}:`, err.message);
-    return 0;
-  }
+    const p = parseFloat(data[0]?.last);
+    if (!isNaN(p) && p > 0) return p;
+  } catch {}
+
+  // Binance fallback: BTC_USDT → BTCUSDT
+  try {
+    const symbol = contract.replace('_', '');
+    const res = await fetch(
+      `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    const data = await res.json();
+    const p = parseFloat(data?.price);
+    if (!isNaN(p) && p > 0) return p;
+  } catch {}
+
+  return null;
+}
+
+// Batch-fetch prices for all unique contracts in parallel
+async function fetchAllPrices(contracts) {
+  const unique = [...new Set(contracts)];
+  const entries = await Promise.all(
+    unique.map(async (c) => [c, await fetchPrice(c)])
+  );
+  return Object.fromEntries(entries);
 }
 
 async function getOpenTrades() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?status=eq.open`, {
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-    },
-  });
+  const res = await fetch(
+    // Oldest first so every trade eventually rotates through;
+    // LIMIT prevents timeout when thousands of stale trades exist
+    `${SUPABASE_URL}/rest/v1/trades?status=eq.open&order=created_at.asc&limit=${BATCH_LIMIT}`,
+    {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    }
+  );
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
@@ -33,8 +62,8 @@ async function updateTrade(id, updates) {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
     },
     body: JSON.stringify(updates),
   });
@@ -45,8 +74,8 @@ async function closeTrade(id, exitPrice, closeReason, pnlUsdt, pnlPct) {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
     },
     body: JSON.stringify({
       status: 'closed',
@@ -62,17 +91,28 @@ async function closeTrade(id, exitPrice, closeReason, pnlUsdt, pnlPct) {
 
 export async function GET() {
   try {
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return Response.json({ error: 'Supabase env vars not set' }, { status: 500 });
+    }
+
     const trades = await getOpenTrades();
 
     if (!Array.isArray(trades) || trades.length === 0) {
-      return Response.json({ checked: 0, updated: 0 });
+      return Response.json({ checked: 0, updated: 0, closed: 0 });
     }
 
+    // Fetch all prices in parallel — one request per unique contract, not per trade
+    const prices = await fetchAllPrices(trades.map(t => t.contract));
+
     let updated = 0;
+    let closed = 0;
 
     for (const trade of trades) {
-      const price = await getCurrentPrice(trade.contract);
-      if (!price) continue;
+      const price = prices[trade.contract];
+      if (!price) {
+        console.warn(`[monitor] No price for ${trade.contract} — skipping`);
+        continue;
+      }
 
       const isLong = trade.direction === 'long';
       const entry = parseFloat(trade.entry_price);
@@ -84,61 +124,58 @@ export async function GET() {
         : (entry - price) * trade.size;
       const pnlPct = (pnlUsdt / EQUITY) * 100;
 
-      // Stop loss hit
+      // Stop loss
       if ((isLong && price <= sl) || (!isLong && price >= sl)) {
         const slPnl = isLong ? (sl - entry) * trade.size : (entry - sl) * trade.size;
         const slPct = (slPnl / EQUITY) * 100;
         await closeTrade(trade.id, sl, 'sl', slPnl, slPct);
-        console.log(`[HPDR] SL hit: ${trade.contract} @ ${sl}, PnL: ${slPnl.toFixed(2)}`);
+        console.log(`[monitor] SL: ${trade.contract} @ ${sl} | PnL ${slPnl.toFixed(2)}`);
+        closed++;
         updated++;
         continue;
       }
 
-      // TP1 — close 50% of position, move SL to break even
+      // TP1 — close 50%, move SL to break-even
       if (stage === 0 && trade.tp1_price) {
         const tp1 = parseFloat(trade.tp1_price);
         if ((isLong && price >= tp1) || (!isLong && price <= tp1)) {
-          const halfSize = Math.floor(trade.size / 2) || 1;
-          const tp1Pnl = isLong
-            ? (tp1 - entry) * halfSize
-            : (entry - tp1) * halfSize;
+          const halfSize = Math.max(1, Math.floor(trade.size / 2));
+          const tp1Pnl = isLong ? (tp1 - entry) * halfSize : (entry - tp1) * halfSize;
           const remainingSize = trade.size - halfSize;
-          const remainingPnl = isLong
-            ? (price - entry) * remainingSize
-            : (entry - price) * remainingSize;
-          const totalPnl = tp1Pnl + remainingPnl;
           await updateTrade(trade.id, {
             stage: 1,
             size: remainingSize,
             sl_price: entry,
             current_price: price,
-            pnl_usdt: totalPnl,
-            pnl_pct: (totalPnl / EQUITY) * 100,
+            pnl_usdt: tp1Pnl + (isLong ? (price - entry) : (entry - price)) * remainingSize,
+            pnl_pct: ((tp1Pnl + (isLong ? (price - entry) : (entry - price)) * remainingSize) / EQUITY) * 100,
           });
-          console.log(`[HPDR] TP1 hit: ${trade.contract} @ ${tp1} — 50% closed, SL → BE, remaining: ${remainingSize} cts`);
+          console.log(`[monitor] TP1: ${trade.contract} @ ${tp1} | 50% closed, SL→BE, rem: ${remainingSize}`);
           updated++;
           continue;
         }
       }
 
-      // TP2 — close remaining position
+      // TP2 — close remainder
       if (stage >= 1 && trade.tp2_price) {
         const tp2 = parseFloat(trade.tp2_price);
         if ((isLong && price >= tp2) || (!isLong && price <= tp2)) {
           await closeTrade(trade.id, price, 'tp2', pnlUsdt, pnlPct);
-          console.log(`[HPDR] TP2 hit: ${trade.contract} @ ${price}, PnL: ${pnlUsdt.toFixed(2)}`);
+          console.log(`[monitor] TP2: ${trade.contract} @ ${price} | PnL ${pnlUsdt.toFixed(2)}`);
+          closed++;
           updated++;
           continue;
         }
       }
 
+      // No trigger — update current price and PnL
       await updateTrade(trade.id, { current_price: price, pnl_usdt: pnlUsdt, pnl_pct: pnlPct });
       updated++;
     }
 
-    return Response.json({ checked: trades.length, updated });
+    return Response.json({ checked: trades.length, updated, closed });
   } catch (err) {
-    console.error('[HPDR] Monitor error:', err.message);
+    console.error('[monitor] Error:', err.message);
     return Response.json({ error: err.message }, { status: 500 });
   }
 }
