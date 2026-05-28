@@ -11,11 +11,17 @@ const supabase = SUPABASE_URL && SUPABASE_KEY
   : null;
 
 async function fetchTrades() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-  });
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    const data = await res.json();
+    console.log('[supabase] fetchTrades status:', res.status, 'rows:', Array.isArray(data) ? data.length : data);
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error('[supabase] fetchTrades error:', err.message);
+    return [];
+  }
 }
 
 function timeAgo(dateStr) {
@@ -254,17 +260,21 @@ export default function Dashboard() {
       if (!contracts.length) return;
       try {
         const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
-        if (!res.ok) return;
         const data = await res.json();
+        console.log('[prices] status:', res.status, 'data:', data);
+        if (!res.ok) return;
         const updates = {};
         for (const [k, v] of Object.entries(data)) {
           if (typeof v === 'number' && v > 0) updates[k] = v;
         }
+        console.log('[prices] updates applied:', updates);
         if (Object.keys(updates).length) {
           setPrices(prev => ({ ...prev, ...updates }));
           setLastTick(new Date());
         }
-      } catch {}
+      } catch (err) {
+        console.error('[prices] fetch error:', err.message);
+      }
     }, 2000);
 
     return () => {
