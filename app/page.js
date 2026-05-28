@@ -1,10 +1,9 @@
 'use client';
-import { useEffect, useState, useCallback, useRef, memo } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const GATE_WS_URL = 'wss://fx-ws.gateio.ws/v4/ws/usdt';
 const EQUITY_START = 1000;
 
 const supabase = SUPABASE_URL && SUPABASE_KEY
@@ -120,7 +119,7 @@ function PositionCard({ trade, livePrice, onClose }) {
             <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, background: '#1a1a0e', color: '#ffaa00', border: '0.5px solid #ffaa0044' }}>BE</span>
           )}
           {isLive && (
-            <span style={{ fontSize: 9, color: '#00e87a', opacity: 0.7 }}>● ws</span>
+            <span style={{ fontSize: 9, color: '#00e87a', opacity: 0.7 }}>● live</span>
           )}
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -212,124 +211,46 @@ export default function Dashboard() {
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [lastTick, setLastTick] = useState(null);
-  const [wsStatus, setWsStatus] = useState('disconnected'); // 'connected' | 'disconnected' | 'error'
 
-  const wsRef = useRef(null);
-  const pingRef = useRef(null);
-  const reconnectRef = useRef(null);
-  const subscribedRef = useRef([]);
-
-  // ── WebSocket ──────────────────────────────────────────────────────────────
-
-  const applyPrices = useCallback((updates) => {
-    if (!updates || !Object.keys(updates).length) return;
-    setPrices(prev => ({ ...prev, ...updates }));
-    setLastTick(new Date());
-  }, []);
-
-  const connectWs = useCallback((contracts) => {
-    if (!contracts.length) return;
-
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-    }
-    clearInterval(pingRef.current);
-    clearTimeout(reconnectRef.current);
-
-    subscribedRef.current = contracts;
-    const ws = new WebSocket(GATE_WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setWsStatus('connected');
-      const t = Math.floor(Date.now() / 1000);
-      // book_ticker: fires on every bid/ask change — most real-time
-      ws.send(JSON.stringify({ time: t, channel: 'futures.book_ticker', event: 'subscribe', payload: contracts }));
-      // tickers: sends last price on any trade — backup
-      ws.send(JSON.stringify({ time: t, channel: 'futures.tickers', event: 'subscribe', payload: contracts }));
-      pingRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: 'futures.ping' }));
-        }
-      }, 10000);
-    };
-
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.event !== 'update') return;
-
-        if (msg.channel === 'futures.book_ticker') {
-          // Gate.io uses 's' for symbol in book_ticker, not 'contract'
-          const r = msg.result;
-          const sym = r?.s || r?.contract;
-          if (sym) {
-            const bid = parseFloat(r.b);
-            const ask = parseFloat(r.a);
-            if (bid > 0 && ask > 0) applyPrices({ [sym]: (bid + ask) / 2 });
-          }
-        }
-
-        if (msg.channel === 'futures.tickers') {
-          // result is an array of ticker objects with .last
-          const tickers = Array.isArray(msg.result) ? msg.result : [msg.result];
-          const updates = {};
-          for (const t of tickers) {
-            if (!t?.contract) continue;
-            const p = parseFloat(t.last);
-            if (p > 0) updates[t.contract] = p;
-          }
-          applyPrices(updates);
-        }
-      } catch {}
-    };
-
-    ws.onerror = () => setWsStatus('error');
-
-    ws.onclose = () => {
-      setWsStatus('disconnected');
-      clearInterval(pingRef.current);
-      reconnectRef.current = setTimeout(() => {
-        if (subscribedRef.current.length > 0) connectWs(subscribedRef.current);
-      }, 3000);
-    };
-  }, [applyPrices]);
-
-  // ── Trade data ─────────────────────────────────────────────────────────────
-
-  const loadTrades = useCallback(async () => {
-    const data = await fetchTrades();
-    setTrades(data);
-    setLoading(false);
-
-    const contracts = [...new Set(data.filter(t => t.status === 'open').map(t => t.contract))];
-
-    // (Re)subscribe WebSocket when open contracts change
-    const prev = subscribedRef.current.slice().sort().join(',');
-    const next = contracts.slice().sort().join(',');
-
-    // Always keep subscribedRef in sync so REST fallback has contracts to poll
-    subscribedRef.current = contracts;
-
-    if (next !== prev) connectWs(contracts);
-  }, [connectWs]);
+  // Ref always holds the latest trades so the price interval never goes stale
+  const tradesRef = useRef([]);
 
   useEffect(() => {
-    loadTrades();
+    async function load() {
+      const data = await fetchTrades();
+      tradesRef.current = data;
+      setTrades(data);
+      setLoading(false);
+    }
 
-    // Supabase Realtime — reload trade list on any DB change
+    load();
+
+    // Supabase Realtime — reload trades on any DB change
     const channel = supabase
       ?.channel('trades-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, loadTrades)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, async () => {
+        const data = await fetchTrades();
+        tradesRef.current = data;
+        setTrades(data);
+      })
       .subscribe();
 
-    // Trade list poll every 30 s
-    const tradePoll = setInterval(loadTrades, 30000);
+    // Trade list poll every 30 s as fallback
+    const tradePoll = setInterval(async () => {
+      const data = await fetchTrades();
+      tradesRef.current = data;
+      setTrades(data);
+    }, 30000);
 
-    // REST price fallback every 3 s — guarantees updates even if WS stalls
+    // Price poll every 2 s — reads tradesRef so it's never stale
     const pricePoll = setInterval(async () => {
-      const contracts = subscribedRef.current;
+      const contracts = [
+        ...new Set(
+          tradesRef.current
+            .filter(t => t.status === 'open')
+            .map(t => t.contract)
+        ),
+      ];
       if (!contracts.length) return;
       try {
         const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
@@ -339,22 +260,19 @@ export default function Dashboard() {
         for (const [k, v] of Object.entries(data)) {
           if (typeof v === 'number' && v > 0) updates[k] = v;
         }
-        applyPrices(updates);
+        if (Object.keys(updates).length) {
+          setPrices(prev => ({ ...prev, ...updates }));
+          setLastTick(new Date());
+        }
       } catch {}
-    }, 3000);
+    }, 2000);
 
     return () => {
       channel && supabase?.removeChannel(channel);
       clearInterval(tradePoll);
       clearInterval(pricePoll);
-      clearInterval(pingRef.current);
-      clearTimeout(reconnectRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-      }
     };
-  }, [loadTrades, applyPrices]);
+  }, []);
 
   // ── Derived stats ──────────────────────────────────────────────────────────
 
@@ -383,18 +301,17 @@ export default function Dashboard() {
   const profitFactor = avgLoss !== 0
     ? Math.abs(avgWin * wins.length) / Math.abs(avgLoss * losses.length) : null;
 
-  const wsColor = wsStatus === 'connected' ? '#00e87a' : wsStatus === 'error' ? '#ff4466' : '#ffaa00';
-  const wsLabel = wsStatus === 'connected' ? 'WS Live' : wsStatus === 'error' ? 'WS Error' : 'WS Connecting…';
-
   const s = {
     dash: { background: '#0a0a0f', minHeight: '100vh', padding: 20, fontFamily: "'JetBrains Mono', monospace", color: '#e8e8f0' },
-    statRow: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 },
     stat: { background: '#11111e', border: '0.5px solid #1e1e2e', borderRadius: 8, padding: 14 },
     statLabel: { fontSize: 10, color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 },
     sectionTitle: { fontSize: 10, color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 10 },
     table: { width: '100%', fontSize: 11, borderCollapse: 'collapse' },
     th: { color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: '0.8px', fontWeight: 400, textAlign: 'left', padding: '6px 8px', borderBottom: '0.5px solid #1e1e2e' },
   };
+
+  const tickColor = lastTick ? '#00e87a' : '#ffaa00';
+  const tickLabel = lastTick ? `Updated ${timeAgo(lastTick.toISOString())}` : 'Waiting for prices…';
 
   return (
     <div style={s.dash}>
@@ -408,15 +325,9 @@ export default function Dashboard() {
           </div>
           <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 · Gate.io Perpetuals</div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-          {/* WebSocket status */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: wsColor, background: '#0d0d1a', border: `0.5px solid ${wsColor}44`, padding: '4px 10px', borderRadius: 20 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: wsColor, display: 'inline-block', animation: wsStatus === 'connected' ? 'pulse 2s infinite' : 'none' }} />
-            {wsLabel}
-            {lastTick && wsStatus === 'connected' && (
-              <span style={{ color: '#5a5a7a', marginLeft: 4 }}>· {timeAgo(lastTick.toISOString())}</span>
-            )}
-          </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tickColor, background: '#0d0d1a', border: `0.5px solid ${tickColor}44`, padding: '4px 10px', borderRadius: 20 }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: tickColor, display: 'inline-block', animation: lastTick ? 'pulse 2s infinite' : 'none' }} />
+          {tickLabel}
         </div>
       </div>
 
@@ -459,7 +370,11 @@ export default function Dashboard() {
             <div style={s.sectionTitle}>Open positions ({open.length})</div>
             {open.length === 0
               ? <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
-              : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} onClose={loadTrades} />)
+              : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} onClose={async () => {
+                  const data = await fetchTrades();
+                  tradesRef.current = data;
+                  setTrades(data);
+                }} />)
             }
           </div>
 
