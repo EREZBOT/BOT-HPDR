@@ -1,5 +1,7 @@
 export const dynamic = 'force-dynamic';
 
+import { fetchPrice } from '../../../lib/prices.js';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
@@ -69,7 +71,17 @@ export async function GET() {
     result.errors.push('Gate.io fetch threw: ' + err.message);
   }
 
-  // 3. Test /api/prices proxy (self-call via relative won't work server-side, so direct Gate.io above is the real test)
+  // 3. Test the multi-source fetcher (Gate.io → Bybit → OKX → Binance)
+  //    Shows which exchanges Vercel can actually reach + per-source errors.
+  try {
+    result.price_sources = {
+      BTC_USDT: await fetchPrice('BTC_USDT'),
+      ETH_USDT: await fetchPrice('ETH_USDT'),
+    };
+  } catch (err) {
+    result.price_sources = 'ERROR';
+    result.errors.push('fetchPrice threw: ' + err.message);
+  }
 
   return Response.json(result, {
     headers: { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' },

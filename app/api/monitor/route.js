@@ -1,48 +1,13 @@
 export const dynamic = 'force-dynamic';
 
+import { fetchAllPrices } from '../../../lib/prices.js';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const EQUITY = 1000;
 // Process at most 30 trades per cron run to avoid Vercel function timeout
 const BATCH_LIMIT = 30;
-
-// Fetch price from Gate.io with Binance fallback
-async function fetchPrice(contract) {
-  // Gate.io
-  try {
-    const res = await fetch(
-      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`,
-      { signal: AbortSignal.timeout(5000) }
-    );
-    const data = await res.json();
-    const p = parseFloat(data[0]?.last);
-    if (!isNaN(p) && p > 0) return p;
-  } catch {}
-
-  // Binance fallback: BTC_USDT → BTCUSDT
-  try {
-    const symbol = contract.replace('_', '');
-    const res = await fetch(
-      `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-      { signal: AbortSignal.timeout(5000) }
-    );
-    const data = await res.json();
-    const p = parseFloat(data?.price);
-    if (!isNaN(p) && p > 0) return p;
-  } catch {}
-
-  return null;
-}
-
-// Batch-fetch prices for all unique contracts in parallel
-async function fetchAllPrices(contracts) {
-  const unique = [...new Set(contracts)];
-  const entries = await Promise.all(
-    unique.map(async (c) => [c, await fetchPrice(c)])
-  );
-  return Object.fromEntries(entries);
-}
 
 async function getOpenTrades() {
   const res = await fetch(
@@ -102,15 +67,17 @@ export async function GET() {
     }
 
     // Fetch all prices in parallel — one request per unique contract, not per trade
-    const prices = await fetchAllPrices(trades.map(t => t.contract));
+    const { prices, sources, diag } = await fetchAllPrices(trades.map(t => t.contract));
 
     let updated = 0;
     let closed = 0;
+    const skipped = [];
 
     for (const trade of trades) {
       const price = prices[trade.contract];
       if (!price) {
-        console.warn(`[monitor] No price for ${trade.contract} — skipping`);
+        console.warn(`[monitor] No price for ${trade.contract}:`, diag[trade.contract]);
+        skipped.push({ contract: trade.contract, errors: diag[trade.contract] });
         continue;
       }
 
@@ -173,7 +140,7 @@ export async function GET() {
       updated++;
     }
 
-    return Response.json({ checked: trades.length, updated, closed });
+    return Response.json({ checked: trades.length, updated, closed, sources, skipped });
   } catch (err) {
     console.error('[monitor] Error:', err.message);
     return Response.json({ error: err.message }, { status: 500 });
