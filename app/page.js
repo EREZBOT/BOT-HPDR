@@ -2,6 +2,7 @@
 import { useEffect, useState, useRef } from 'react';
 
 const EQUITY_START = 1000;
+const BUILD_VERSION = 'v2.3-2026-05-28';
 
 async function fetchTrades() {
   try {
@@ -341,7 +342,7 @@ export default function Dashboard() {
           <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
             HPDR<span style={{ color: '#00e87a' }}>bot</span>
           </div>
-          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 · Gate.io Perpetuals</div>
+          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 · Gate.io Perpetuals · <span style={{ color: '#00e87a' }}>{BUILD_VERSION}</span></div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: tickColor, background: '#0d0d1a', border: `0.5px solid ${tickColor}44`, padding: '4px 10px', borderRadius: 20 }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: tickColor, display: 'inline-block', animation: lastTick ? 'pulse 2s infinite' : 'none' }} />
