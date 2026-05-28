@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 export async function GET(req) {
   try {
     const contracts = new URL(req.url).searchParams.get('contracts') || '';

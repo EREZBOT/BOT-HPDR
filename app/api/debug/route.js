@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
@@ -5,8 +7,10 @@ export async function GET() {
   const result = {
     env: {
       SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SUPABASE_URL_prefix: (process.env.SUPABASE_URL || '').slice(0, 30) || '(not set)',
       SUPABASE_SECRET_KEY: !!process.env.SUPABASE_SECRET_KEY,
       NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+      NEXT_PUBLIC_SUPABASE_URL_prefix: (process.env.NEXT_PUBLIC_SUPABASE_URL || '').slice(0, 30) || '(not set)',
       NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
       WEBHOOK_SECRET: !!process.env.WEBHOOK_SECRET,
     },
