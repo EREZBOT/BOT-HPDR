@@ -1,23 +1,14 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
-import { createClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-const supabase = SUPABASE_URL && SUPABASE_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_KEY)
-  : null;
+import { useEffect, useState, useRef } from 'react';
 
 async function fetchTrades() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-    },
-  });
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  try {
+    const res = await fetch('/api/trades');
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
 
 // Server-side proxy — no CORS issues
@@ -180,49 +171,41 @@ export default function Dashboard() {
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState(null);
-  const [realtimeOk, setRealtimeOk] = useState(false);
-
-  const load = useCallback(async () => {
-    const data = await fetchTrades();
-    setTrades(data);
-    setLastUpdate(new Date());
-    setLoading(false);
-
-    const open = data.filter(t => t.status === 'open');
-    const contracts = [...new Set(open.map(t => t.contract))];
-    if (contracts.length > 0) {
-      const priceMap = await fetchPrices(contracts);
-      setPrices(priceMap);
-    }
-  }, []);
+  const [lastTick, setLastTick] = useState(null);
+  const tradesRef = useRef([]);
 
   useEffect(() => {
-    load();
-
-    // Supabase Realtime — fires instantly when monitor updates any trade
-    if (supabase) {
-      const channel = supabase
-        .channel('trades-realtime')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => {
-          load();
-        })
-        .subscribe((status) => {
-          setRealtimeOk(status === 'SUBSCRIBED');
-        });
-
-      // Fallback polling every 15s (in case realtime is not enabled on table)
-      const poll = setInterval(load, 15000);
-
-      return () => {
-        supabase.removeChannel(channel);
-        clearInterval(poll);
-      };
-    } else {
-      const poll = setInterval(load, 15000);
-      return () => clearInterval(poll);
+    async function loadTrades() {
+      const data = await fetchTrades();
+      tradesRef.current = data;
+      setTrades(data);
+      setLoading(false);
     }
-  }, [load]);
+
+    loadTrades();
+    const tradePoll = setInterval(loadTrades, 15000);
+
+    const pricePoll = setInterval(async () => {
+      const contracts = [...new Set(
+        tradesRef.current.filter(t => t.status === 'open').map(t => t.contract)
+      )];
+      if (!contracts.length) return;
+      const priceData = await fetchPrices(contracts);
+      const updates = {};
+      for (const [k, v] of Object.entries(priceData)) {
+        if (typeof v === 'number' && v > 0) updates[k] = v;
+      }
+      if (Object.keys(updates).length) {
+        setPrices(prev => ({ ...prev, ...updates }));
+        setLastTick(new Date());
+      }
+    }, 2000);
+
+    return () => {
+      clearInterval(tradePoll);
+      clearInterval(pricePoll);
+    };
+  }, []);
 
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
@@ -264,10 +247,9 @@ export default function Dashboard() {
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#00e87a', background: '#001a0e', border: '0.5px solid #00e87a44', padding: '4px 10px', borderRadius: 20 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00e87a', display: 'inline-block', animation: 'pulse 2s infinite' }} />
-            {realtimeOk ? 'Realtime' : 'Polling 15s'}
-            {lastUpdate && <span style={{ color: '#5a5a7a', marginLeft: 6 }}>· {timeAgo(lastUpdate.toISOString())}</span>}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: lastTick ? '#00e87a' : '#ffaa00', background: lastTick ? '#001a0e' : '#1a1000', border: `0.5px solid ${lastTick ? '#00e87a44' : '#ffaa0044'}`, padding: '4px 10px', borderRadius: 20 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: lastTick ? '#00e87a' : '#ffaa00', display: 'inline-block', animation: 'pulse 2s infinite' }} />
+            {lastTick ? `Prices updated ${timeAgo(lastTick.toISOString())}` : 'Waiting for prices…'}
           </div>
         </div>
       </div>
