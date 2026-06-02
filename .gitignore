@@ -13,3 +13,6 @@ out/
 # misc
 package-lock.json
 npm-debug.log*
+
+# macOS
+.DS_Store

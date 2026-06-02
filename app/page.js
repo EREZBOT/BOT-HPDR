@@ -1,25 +1,27 @@
 'use client';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, memo } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+// FIX 5 (dashboard): NEXT_PUBLIC_CLOSE_SECRET is sent in the x-close-secret header
+// when the user clicks 'Close position'. Intentionally separate from WEBHOOK_SECRET
+// (which is server-only). Set CLOSE_SECRET and NEXT_PUBLIC_CLOSE_SECRET to the same
+// value in Vercel.
+const CLOSE_SECRET = process.env.NEXT_PUBLIC_CLOSE_SECRET;
+const GATE_WS_URL = 'wss://fx-ws.gateio.ws/v4/ws/usdt';
+const EQUITY_START = 1000;
+
+const supabase = SUPABASE_URL && SUPABASE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
 
 async function fetchTrades() {
-  try {
-    const res = await fetch('/api/trades');
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
-}
-
-// Server-side proxy — no CORS issues
-async function fetchPrices(contracts) {
-  if (!contracts.length) return {};
-  try {
-    const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
-    return await res.json();
-  } catch {
-    return {};
-  }
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+  });
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
 function timeAgo(dateStr) {
@@ -44,13 +46,26 @@ function TPBar({ label, price, pct, color }) {
         <span style={{ color: clamped > 50 ? '#00e87a' : '#5a5a7a' }}>{clamped}%</span>
       </div>
       <div style={{ height: 4, background: '#1e1e2e', borderRadius: 2, overflow: 'hidden' }}>
-        <div style={{ height: 4, width: `${clamped}%`, borderRadius: 2, background: color, transition: 'width 0.6s ease' }} />
+        <div style={{ height: 4, width: `${clamped}%`, borderRadius: 2, background: color, transition: 'width 0.4s ease' }} />
       </div>
     </div>
   );
 }
 
-function PositionCard({ trade, livePrice }) {
+async function manualClose(id) {
+  const headers = { 'Content-Type': 'application/json' };
+  // Send the close secret so /api/close can authenticate the request.
+  // Without this header the server rejects the call with 401 when CLOSE_SECRET is set.
+  if (CLOSE_SECRET) headers['x-close-secret'] = CLOSE_SECRET;
+  const res = await fetch('/api/close', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ id }),
+  });
+  return res.json();
+}
+
+function PositionCard({ trade, livePrice, onClose }) {
   const isLong = trade.direction === 'long';
   const entry = Number(trade.entry_price);
   const tp1 = Number(trade.tp1_price) || 0;
@@ -59,17 +74,36 @@ function PositionCard({ trade, livePrice }) {
   const size = Number(trade.size);
   const stage = trade.stage ?? 0;
 
-  // Prefer live price, then DB current_price, then entry
-  const current = livePrice || Number(trade.current_price) || entry;
+  const [closing, setClosing] = useState(false);
+  const dbPrice = Number(trade.current_price);
+  const current = (livePrice > 0) ? livePrice : (dbPrice > 0 ? dbPrice : entry);
+  const isLive = livePrice > 0;
+
+  const [flash, setFlash] = useState(false);
+  const prevPrice = useRef(current);
+  useEffect(() => {
+    if (current !== prevPrice.current) {
+      prevPrice.current = current;
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 350);
+      return () => clearTimeout(t);
+    }
+  }, [current]);
+
+  const handleClose = async () => {
+    if (!confirm(`Close ${trade.contract} ${trade.direction.toUpperCase()} at $${fmt(current)}?`)) return;
+    setClosing(true);
+    const res = await manualClose(trade.id);
+    if (res.error) { alert(`Error: ${res.error}`); setClosing(false); }
+    else onClose();
+  };
 
   const pnlUsdt = isLong ? (current - entry) * size : (entry - current) * size;
   const pnlPct = (pnlUsdt / 1000) * 100;
 
   const progress = isLong ? current - entry : entry - current;
-  const range1 = tp1 - entry || 1;
-  const range2 = tp2 - entry || 1;
-  const pct1 = tp1 ? Math.round((progress / range1) * 100) : 0;
-  const pct2 = tp2 ? Math.round((progress / range2) * 100) : 0;
+  const pct1 = tp1 ? Math.round((progress / ((tp1 - entry) || 1)) * 100) : 0;
+  const pct2 = tp2 ? Math.round((progress / ((tp2 - entry) || 1)) * 100) : 0;
 
   return (
     <div style={{
@@ -92,9 +126,10 @@ function PositionCard({ trade, livePrice }) {
           </span>
           <span style={{ fontSize: 14, fontWeight: 500, color: '#e8e8f0' }}>{trade.contract}</span>
           {stage >= 1 && (
-            <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, background: '#1a1a0e', color: '#ffaa00', border: '0.5px solid #ffaa0044' }}>
-              BE
-            </span>
+            <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, background: '#1a1a0e', color: '#ffaa00', border: '0.5px solid #ffaa0044' }}>BE</span>
+          )}
+          {isLive && (
+            <span style={{ fontSize: 9, color: '#00e87a', opacity: 0.7 }}>● ws</span>
           )}
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -110,7 +145,7 @@ function PositionCard({ trade, livePrice }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginBottom: 12 }}>
         {[
           ['Entry', `$${fmt(entry)}`],
-          ['Current', `$${fmt(current)}`],
+          ['Current', current],
           ['Size', `${size} cts`],
           ['Stop loss', `$${fmt(sl)}`],
           ['TP1', tp1 ? `$${fmt(tp1)}` : '—'],
@@ -123,7 +158,11 @@ function PositionCard({ trade, livePrice }) {
               color: label === 'Stop loss' ? '#ff4466'
                 : label === 'Current' ? (pnlUsdt >= 0 ? '#00e87a' : '#ff4466')
                 : '#b0b0cc',
-            }}>{val}</div>
+            }}>
+              {label === 'Current'
+                ? <span style={{ transition: 'opacity 0.35s', opacity: flash ? 0.4 : 1 }}>${fmt(val)}</span>
+                : val}
+            </div>
           </div>
         ))}
       </div>
@@ -131,9 +170,19 @@ function PositionCard({ trade, livePrice }) {
       <TPBar label="TP1" price={tp1} pct={pct1} color="#00e87a" />
       <TPBar label="TP2" price={tp2} pct={pct2} color="#3a3a5a" />
 
-      <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 8, textAlign: 'right' }}>
-        Opened {timeAgo(trade.created_at)}
-        {livePrice ? <span style={{ color: '#2a6a4a', marginLeft: 8 }}>● live</span> : null}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+        <div style={{ fontSize: 10, color: '#5a5a7a' }}>Opened {timeAgo(trade.created_at)}</div>
+        <button
+          onClick={handleClose}
+          disabled={closing}
+          style={{
+            fontSize: 10, padding: '4px 12px', borderRadius: 4, cursor: closing ? 'not-allowed' : 'pointer',
+            background: 'transparent', border: '0.5px solid #ff446688',
+            color: closing ? '#5a5a7a' : '#ff4466', opacity: closing ? 0.5 : 1,
+          }}
+        >
+          {closing ? 'Closing…' : 'Close position'}
+        </button>
       </div>
     </div>
   );
@@ -168,44 +217,153 @@ function HistoryRow({ trade }) {
 }
 
 export default function Dashboard() {
+  
+console.log("TEST ENV:", process.env.NEXT_PUBLIC_TEST_ENV);
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [lastTick, setLastTick] = useState(null);
-  const tradesRef = useRef([]);
+  const [wsStatus, setWsStatus] = useState('disconnected'); // 'connected' | 'disconnected' | 'error'
+
+  const wsRef = useRef(null);
+  const pingRef = useRef(null);
+  const reconnectRef = useRef(null);
+  const subscribedRef = useRef([]);
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+
+  const applyPrices = useCallback((updates) => {
+    if (!updates || !Object.keys(updates).length) return;
+    setPrices(prev => ({ ...prev, ...updates }));
+    setLastTick(new Date());
+  }, []);
+
+  const connectWs = useCallback((contracts) => {
+    if (!contracts.length) return;
+
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
+    clearInterval(pingRef.current);
+    clearTimeout(reconnectRef.current);
+
+    subscribedRef.current = contracts;
+    const ws = new WebSocket(GATE_WS_URL);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setWsStatus('connected');
+      const t = Math.floor(Date.now() / 1000);
+      // book_ticker: fires on every bid/ask change — most real-time
+      ws.send(JSON.stringify({ time: t, channel: 'futures.book_ticker', event: 'subscribe', payload: contracts }));
+      // tickers: sends last price on any trade — backup
+      ws.send(JSON.stringify({ time: t, channel: 'futures.tickers', event: 'subscribe', payload: contracts }));
+      pingRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: 'futures.ping' }));
+        }
+      }, 10000);
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.event !== 'update') return;
+
+        if (msg.channel === 'futures.book_ticker') {
+          // result is a single object: {contract, b: bid, a: ask}
+          const r = msg.result;
+          if (r?.contract) {
+            const bid = parseFloat(r.b);
+            const ask = parseFloat(r.a);
+            if (bid > 0 && ask > 0) applyPrices({ [r.contract]: (bid + ask) / 2 });
+          }
+        }
+
+        if (msg.channel === 'futures.tickers') {
+          // result is an array of ticker objects with .last
+          const tickers = Array.isArray(msg.result) ? msg.result : [msg.result];
+          const updates = {};
+          for (const t of tickers) {
+            if (!t?.contract) continue;
+            const p = parseFloat(t.last);
+            if (p > 0) updates[t.contract] = p;
+          }
+          applyPrices(updates);
+        }
+      } catch {}
+    };
+
+    ws.onerror = () => setWsStatus('error');
+
+    ws.onclose = () => {
+      setWsStatus('disconnected');
+      clearInterval(pingRef.current);
+      reconnectRef.current = setTimeout(() => {
+        if (subscribedRef.current.length > 0) connectWs(subscribedRef.current);
+      }, 3000);
+    };
+  }, [applyPrices]);
+
+  // ── Trade data ─────────────────────────────────────────────────────────────
+
+  const loadTrades = useCallback(async () => {
+
+    const data = await fetchTrades();
+    setTrades(data);
+    setLoading(false);
+
+    const contracts = [...new Set(data.filter(t => t.status === 'open').map(t => t.contract))];
+
+    // (Re)subscribe WebSocket when open contracts change
+    const prev = subscribedRef.current.slice().sort().join(',');
+    const next = contracts.slice().sort().join(',');
+    if (next !== prev) connectWs(contracts);
+  }, [connectWs]);
 
   useEffect(() => {
-    async function loadTrades() {
-      const data = await fetchTrades();
-      tradesRef.current = data;
-      setTrades(data);
-      setLoading(false);
-    }
-
     loadTrades();
-    const tradePoll = setInterval(loadTrades, 15000);
 
+    // Supabase Realtime — reload trade list on any DB change
+    const channel = supabase
+      ?.channel('trades-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, loadTrades)
+      .subscribe();
+
+    // Trade list poll every 30 s
+    const tradePoll = setInterval(loadTrades, 30000);
+
+    // REST price fallback every 5 s — guarantees updates even if WS stalls
     const pricePoll = setInterval(async () => {
-      const contracts = [...new Set(
-        tradesRef.current.filter(t => t.status === 'open').map(t => t.contract)
-      )];
+      const contracts = subscribedRef.current;
       if (!contracts.length) return;
-      const priceData = await fetchPrices(contracts);
-      const updates = {};
-      for (const [k, v] of Object.entries(priceData)) {
-        if (typeof v === 'number' && v > 0) updates[k] = v;
-      }
-      if (Object.keys(updates).length) {
-        setPrices(prev => ({ ...prev, ...updates }));
-        setLastTick(new Date());
-      }
-    }, 2000);
+      try {
+        const res = await fetch(`/api/prices?contracts=${contracts.join(',')}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const updates = {};
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'number' && v > 0) updates[k] = v;
+        }
+        applyPrices(updates);
+      } catch {}
+    }, 5000);
 
     return () => {
+      channel && supabase?.removeChannel(channel);
       clearInterval(tradePoll);
       clearInterval(pricePoll);
+      clearInterval(pingRef.current);
+      clearTimeout(reconnectRef.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
     };
-  }, []);
+  }, [loadTrades, applyPrices]);
+
+  // ── Derived stats ──────────────────────────────────────────────────────────
 
   const open = trades.filter(t => t.status === 'open');
   const closed = trades.filter(t => t.status !== 'open');
@@ -215,16 +373,28 @@ export default function Dashboard() {
 
   const openPnl = open.reduce((sum, trade) => {
     const entry = Number(trade.entry_price);
-    const current = prices[trade.contract] || Number(trade.current_price) || entry;
+    const live = prices[trade.contract];
+    const db = Number(trade.current_price);
+    const current = (live > 0) ? live : (db > 0 ? db : entry);
     const isLong = trade.direction === 'long';
-    return sum + (isLong ? (current - entry) : (entry - current)) * Number(trade.size);
+    return sum + (isLong ? current - entry : entry - current) * Number(trade.size);
   }, 0);
 
   const closedPnl = closed.reduce((sum, t) => sum + Number(t.pnl_usdt || 0), 0);
+  const equity = EQUITY_START + closedPnl + openPnl;
+
+  const avgWin = wins.length > 0
+    ? wins.reduce((s, t) => s + Number(t.pnl_usdt), 0) / wins.length : 0;
+  const avgLoss = losses.length > 0
+    ? losses.reduce((s, t) => s + Number(t.pnl_usdt), 0) / losses.length : 0;
+  const profitFactor = avgLoss !== 0
+    ? Math.abs(avgWin * wins.length) / Math.abs(avgLoss * losses.length) : null;
+
+  const wsColor = wsStatus === 'connected' ? '#00e87a' : wsStatus === 'error' ? '#ff4466' : '#ffaa00';
+  const wsLabel = wsStatus === 'connected' ? 'WS Live' : wsStatus === 'error' ? 'WS Error' : 'WS Connecting…';
 
   const s = {
     dash: { background: '#0a0a0f', minHeight: '100vh', padding: 20, fontFamily: "'JetBrains Mono', monospace", color: '#e8e8f0' },
-    topbar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, paddingBottom: 16, borderBottom: '0.5px solid #1e1e2e' },
     statRow: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 },
     stat: { background: '#11111e', border: '0.5px solid #1e1e2e', borderRadius: 8, padding: 14 },
     statLabel: { fontSize: 10, color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 },
@@ -237,19 +407,22 @@ export default function Dashboard() {
     <div style={s.dash}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
-      <div style={s.topbar}>
+      {/* Top bar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, paddingBottom: 16, borderBottom: '0.5px solid #1e1e2e' }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: -1 }}>
             HPDR<span style={{ color: '#00e87a' }}>bot</span>
           </div>
-          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>
-            Paper Mode · x25 · Gate.io Perpetuals
-          </div>
+          <div style={{ fontSize: 10, color: '#5a5a7a', marginTop: 2 }}>Paper Mode · x25 · Gate.io Perpetuals</div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: lastTick ? '#00e87a' : '#ffaa00', background: lastTick ? '#001a0e' : '#1a1000', border: `0.5px solid ${lastTick ? '#00e87a44' : '#ffaa0044'}`, padding: '4px 10px', borderRadius: 20 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: lastTick ? '#00e87a' : '#ffaa00', display: 'inline-block', animation: 'pulse 2s infinite' }} />
-            {lastTick ? `Prices updated ${timeAgo(lastTick.toISOString())}` : 'Waiting for prices…'}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+          {/* WebSocket status */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: wsColor, background: '#0d0d1a', border: `0.5px solid ${wsColor}44`, padding: '4px 10px', borderRadius: 20 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: wsColor, display: 'inline-block', animation: wsStatus === 'connected' ? 'pulse 2s infinite' : 'none' }} />
+            {wsLabel}
+            {lastTick && wsStatus === 'connected' && (
+              <span style={{ color: '#5a5a7a', marginLeft: 4 }}>· {timeAgo(lastTick.toISOString())}</span>
+            )}
           </div>
         </div>
       </div>
@@ -258,12 +431,13 @@ export default function Dashboard() {
         <div style={{ textAlign: 'center', color: '#5a5a7a', marginTop: 60, fontSize: 13 }}>Loading...</div>
       ) : (
         <>
-          <div style={s.statRow}>
+          {/* Stats row 1 — equity */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 10 }}>
             {[
-              ['Closed trades', closed.length, '#4488ff'],
-              ['Win rate', closed.length > 0 ? `${winRate}%` : '—', winRate >= 50 ? '#00e87a' : '#ff4466'],
-              ['Open now', open.length, '#ffaa00'],
+              ['Equity', `$${fmt(equity)}`, equity >= EQUITY_START ? '#00e87a' : '#ff4466'],
+              ['Closed P&L', `${closedPnl >= 0 ? '+' : ''}$${fmt(closedPnl)}`, closedPnl >= 0 ? '#00e87a' : '#ff4466'],
               ['Open P&L', `${openPnl >= 0 ? '+' : ''}$${fmt(openPnl)}`, openPnl >= 0 ? '#00e87a' : '#ff4466'],
+              ['Open now', open.length, '#ffaa00'],
             ].map(([label, val, color]) => (
               <div key={label} style={s.stat}>
                 <div style={s.statLabel}>{label}</div>
@@ -272,15 +446,31 @@ export default function Dashboard() {
             ))}
           </div>
 
-          <div style={{ marginBottom: 20 }}>
-            <div style={s.sectionTitle}>Open positions ({open.length})</div>
-            {open.length === 0 ? (
-              <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
-            ) : (
-              open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} />)
-            )}
+          {/* Stats row 2 — performance */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 20 }}>
+            {[
+              ['Win rate', closed.length > 0 ? `${winRate}%` : '—', winRate >= 50 ? '#00e87a' : closed.length > 0 ? '#ff4466' : '#5a5a7a'],
+              ['Trades', `${wins.length}W / ${losses.length}L`, '#4488ff'],
+              ['Avg win', wins.length > 0 ? `+$${fmt(avgWin)}` : '—', '#00e87a'],
+              ['Profit factor', profitFactor != null ? fmt(profitFactor) : '—', profitFactor != null && profitFactor >= 1 ? '#00e87a' : '#5a5a7a'],
+            ].map(([label, val, color]) => (
+              <div key={label} style={{ ...s.stat, padding: 10 }}>
+                <div style={s.statLabel}>{label}</div>
+                <div style={{ fontSize: 16, fontWeight: 500, color }}>{val}</div>
+              </div>
+            ))}
           </div>
 
+          {/* Open positions */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={s.sectionTitle}>Open positions ({open.length})</div>
+            {open.length === 0
+              ? <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No open positions</div>
+              : open.map(t => <PositionCard key={t.id} trade={t} livePrice={prices[t.contract]} onClose={loadTrades} />)
+            }
+          </div>
+
+          {/* Closed trades */}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
               <div style={s.sectionTitle}>
@@ -293,31 +483,29 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
-            {closed.length === 0 ? (
-              <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No closed trades yet</div>
-            ) : (
-              <table style={s.table}>
-                <thead>
-                  <tr>
-                    {['Pair', 'Dir', 'Entry', 'Exit', 'P&L', 'Reason', 'Closed'].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {closed.map(t => <HistoryRow key={t.id} trade={t} />)}
-                </tbody>
-              </table>
-            )}
+            {closed.length === 0
+              ? <div style={{ color: '#5a5a7a', fontSize: 12, padding: '20px 0' }}>No closed trades yet</div>
+              : (
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      {['Pair', 'Dir', 'Entry', 'Exit', 'P&L', 'Reason', 'Closed'].map(h => (
+                        <th key={h} style={s.th}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {closed.map(t => <HistoryRow key={t.id} trade={t} />)}
+                  </tbody>
+                </table>
+              )
+            }
           </div>
         </>
       )}
 
       <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
       `}</style>
     </div>
   );
