@@ -1,7 +1,3 @@
-export const dynamic = 'force-dynamic';
-
-import { fetchAllPrices } from '../../../lib/prices.js';
-
 export async function GET(req) {
   try {
     const contracts = new URL(req.url).searchParams.get('contracts') || '';
@@ -11,13 +7,22 @@ export async function GET(req) {
       return Response.json({}, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    const { prices, sources, diag } = await fetchAllPrices(list);
+    const prices = {};
+    await Promise.all(list.map(async (contract) => {
+      try {
+        const res = await fetch(
+          `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
+        );
+        const data = await res.json();
+        const last = parseFloat(data[0]?.last);
+        prices[contract] = isNaN(last) ? null : last;
+      } catch (err) {
+        console.error(`[prices] ${contract}:`, err.message);
+        prices[contract] = null;
+      }
+    }));
 
-    // Flat shape { CONTRACT: price } plus debug fields, for the dashboard poll
-    return Response.json(
-      { ...prices, _sources: sources, _diag: diag },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
+    return Response.json(prices, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err) {
     console.error('[prices] Fatal:', err.message);
     return Response.json({ _error: err.message }, { status: 500 });

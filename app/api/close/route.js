@@ -1,7 +1,12 @@
-export const dynamic = 'force-dynamic';
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
+
+// FIX 5a: CLOSE_SECRET is a dedicated secret for the manual-close endpoint.
+// It is intentionally separate from WEBHOOK_SECRET so it can be exposed as
+// NEXT_PUBLIC_CLOSE_SECRET in the dashboard without leaking the inbound webhook
+// secret. Set both to the same value in Vercel if you want simplicity, or use
+// different values for better isolation.
+const CLOSE_SECRET = process.env.CLOSE_SECRET;
 
 const EQUITY_START = 1000;
 
@@ -15,12 +20,34 @@ async function getPrice(contract) {
 
 export async function POST(req) {
   try {
-    const { id } = await req.json();
-    if (!id) return Response.json({ error: 'Missing id' }, { status: 400 });
+    // ── FIX 5a: authentication ────────────────────────────────────────────────
+    // Without this check, any HTTP client that guesses or enumerates a trade ID
+    // (sequential integers) can close any position at any time.
+    // The dashboard sends this header using the NEXT_PUBLIC_CLOSE_SECRET env var.
+    if (CLOSE_SECRET) {
+      const provided = req.headers.get('x-close-secret');
+      if (provided !== CLOSE_SECRET) {
+        console.warn('[HPDR] Close: unauthorized attempt rejected');
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+    }
 
-    // Fetch the trade
+    const body = await req.json();
+
+    // ── FIX 5b: id validation — prevent URL parameter injection ──────────────
+    // BEFORE: `const { id } = await req.json()` then `?id=eq.${id}` directly.
+    //   A payload like {"id": "1&status=eq.open"} manipulates the Supabase query.
+    //
+    // AFTER: parseInt with strict bounds check. Any non-positive-integer id is
+    //   rejected before it can touch the URL.
+    const safeId = parseInt(body.id, 10);
+    if (!Number.isInteger(safeId) || safeId <= 0) {
+      return Response.json({ error: 'Invalid id — must be a positive integer' }, { status: 400 });
+    }
+
+    // Fetch the trade using the validated integer id
     const tradeRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/trades?id=eq.${id}&select=*`,
+      `${SUPABASE_URL}/rest/v1/trades?id=eq.${safeId}&select=*`,
       { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
     );
     const rows = await tradeRes.json();
@@ -38,7 +65,8 @@ export async function POST(req) {
       : (entry - price) * trade.size;
     const pnlPct = (pnlUsdt / EQUITY_START) * 100;
 
-    await fetch(`${SUPABASE_URL}/rest/v1/trades?id=eq.${id}`, {
+    // Use safeId (not body.id) in the PATCH URL
+    await fetch(`${SUPABASE_URL}/rest/v1/trades?id=eq.${safeId}`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',

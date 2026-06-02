@@ -1,12 +1,15 @@
-export const dynamic = 'force-dynamic';
 
+console.log("ENV CHECK");
+console.log(process.env.NEXT_PUBLIC_SUPABASE_URL);
+console.log(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-
 const EQUITY = 1000;
 const RISK_PCT = 0.10;
-const LEVERAGE = 25;
+// LEVERAGE removed from this file — it was incorrectly used in position sizing.
+// Leverage is a margin concept (how much collateral the exchange requires) and
+// does NOT amplify the USDT P&L per contract in a paper system. See sizing below.
 
 function toGateContract(symbol) {
   const s = symbol.toUpperCase().replace(/\.P$/, '').replace(/PERP$/, '');
@@ -30,11 +33,27 @@ async function saveTrade(trade) {
       'Content-Type': 'application/json',
       'apikey': SUPABASE_KEY,
       'Authorization': `Bearer ${SUPABASE_KEY}`,
+      // return=representation: get the saved row back so the caller can return it.
       'Prefer': 'return=representation',
     },
     body: JSON.stringify(trade),
   });
-  return res.json();
+
+  // Supabase returns 409 when the unique partial index blocks a duplicate open trade.
+  // This is the definitive atomic guard — surface it so the caller returns a clean 409.
+  if (res.status === 409) {
+    return { _duplicate: true };
+  }
+
+  const data = await res.json();
+
+  // Any other non-2xx is an unexpected DB error — log it so it is not silently swallowed.
+  if (!res.ok) {
+    console.error('[HPDR] Supabase insert error:', JSON.stringify(data));
+    return { _error: true, detail: data };
+  }
+
+  return data;
 }
 
 async function hasOpenTrade(contract) {
@@ -73,6 +92,9 @@ export async function POST(req) {
 
     const contract = toGateContract(symbol);
 
+    // hasOpenTrade() is a fast pre-check that avoids a wasted insert attempt in the
+    // common case. It is NOT the race-condition guard — the unique partial index in
+    // the DB is. Two simultaneous calls can both pass here; the DB rejects the second.
     const alreadyOpen = await hasOpenTrade(contract);
     if (alreadyOpen) {
       return Response.json({ error: `Trade already open for ${contract}` }, { status: 409 });
@@ -86,9 +108,22 @@ export async function POST(req) {
     const isLong = action === 'long';
     const slPct = parseFloat(sl_pct) || 2.5;
 
-    const riskAmount = EQUITY * RISK_PCT;
-    const positionValue = (riskAmount / (slPct / 100)) * LEVERAGE;
-    const size = Math.max(1, Math.floor(positionValue / currentPrice));
+    // ── FIXED: position sizing ──────────────────────────────────────────────────
+    // BEFORE (incorrect):
+    //   positionValue = (riskAmount / slPct%) * LEVERAGE   ← leverage inflates size 25×
+    //   size = floor(positionValue / price)
+    //   Example: ETH @ $3,000 → 33 contracts ($2,475 risk vs $100 budget)
+    //
+    // AFTER (correct):
+    //   riskPerContract = entry_price × sl_pct%  ← USDT lost on this contract if SL hits
+    //   size = floor(riskAmount / riskPerContract)
+    //   Example: ETH @ $3,000 → floor(100 / 75) = 1 contract ($75 risk ≈ $100 budget)
+    //
+    // Leverage is NOT in this formula. It determines margin requirements at the exchange,
+    // not how much USDT you gain or lose per price unit on one contract.
+    const riskAmount = EQUITY * RISK_PCT;                     // e.g. $100
+    const riskPerContract = currentPrice * (slPct / 100);     // USDT at risk per contract
+    const size = Math.max(1, Math.floor(riskAmount / riskPerContract));
 
     const slPrice = isLong
       ? currentPrice * (1 - slPct / 100)
@@ -122,7 +157,17 @@ export async function POST(req) {
     };
 
     const saved = await saveTrade(trade);
-    console.log(`[HPDR] New trade: ${action.toUpperCase()} ${contract} @ ${currentPrice}`);
+
+    // DB unique index fired — a concurrent request beat us to the insert.
+    if (saved._duplicate) {
+      return Response.json({ error: `Trade already open for ${contract}` }, { status: 409 });
+    }
+    // Unexpected DB error.
+    if (saved._error) {
+      return Response.json({ error: 'Failed to save trade to database' }, { status: 500 });
+    }
+
+    console.log(`[HPDR] New trade: ${action.toUpperCase()} ${contract} @ ${currentPrice}, size: ${size}`);
     return Response.json({ success: true, trade: saved });
 
   } catch (err) {
