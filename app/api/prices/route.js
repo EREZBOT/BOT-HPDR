@@ -1,3 +1,11 @@
+export const dynamic = 'force-dynamic';
+
+import { fetchAllPrices } from '../../../lib/prices.js';
+
+// REST fallback for the dashboard. The browser's primary price feed is the
+// Gate.io WebSocket (which connects from the user's own IP and is NOT blocked).
+// This endpoint runs on Vercel, where Gate.io returns 451, so it relies on the
+// Bybit/OKX/CryptoCompare fallbacks inside fetchAllPrices.
 export async function GET(req) {
   try {
     const contracts = new URL(req.url).searchParams.get('contracts') || '';
@@ -7,21 +15,9 @@ export async function GET(req) {
       return Response.json({}, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    const prices = {};
-    await Promise.all(list.map(async (contract) => {
-      try {
-        const res = await fetch(
-          `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
-        );
-        const data = await res.json();
-        const last = parseFloat(data[0]?.last);
-        prices[contract] = isNaN(last) ? null : last;
-      } catch (err) {
-        console.error(`[prices] ${contract}:`, err.message);
-        prices[contract] = null;
-      }
-    }));
+    const { prices } = await fetchAllPrices(list);
 
+    // Flat shape { CONTRACT: price|null } for the dashboard price poll.
     return Response.json(prices, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err) {
     console.error('[prices] Fatal:', err.message);

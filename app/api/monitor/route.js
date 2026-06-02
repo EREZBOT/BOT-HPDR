@@ -1,30 +1,29 @@
+export const dynamic = 'force-dynamic';
+
+import { fetchAllPrices } from '../../../lib/prices.js';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 // FIX 4: CRON_SECRET is read here for monitor authentication (see GET handler below).
 const CRON_SECRET = process.env.CRON_SECRET;
 
 const EQUITY = 1000;
-
-async function getCurrentPrice(contract) {
-  try {
-    const res = await fetch(
-      `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
-    );
-    const data = await res.json();
-    return parseFloat(data[0]?.last || 0);
-  } catch (err) {
-    console.error(`[HPDR] Price fetch error for ${contract}:`, err.message);
-    return 0;
-  }
-}
+// Process at most this many trades per cron run. The price fetch and the
+// per-trade Supabase PATCH are network calls; without a cap a backlog of
+// hundreds of open trades runs the serverless function past its timeout and
+// NOTHING gets updated. Oldest-first ordering rotates every trade through.
+const BATCH_LIMIT = 30;
 
 async function getOpenTrades() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?status=eq.open`, {
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-    },
-  });
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/trades?status=eq.open&order=created_at.asc&limit=${BATCH_LIMIT}`,
+    {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+      },
+    }
+  );
   return res.json();
 }
 
@@ -82,11 +81,21 @@ export async function GET(req) {
       return Response.json({ checked: 0, updated: 0 });
     }
 
+    // Fetch every unique contract's price ONCE, in parallel, using the
+    // multi-source fetcher (Gate.io blocks Vercel's IP, so the fallbacks
+    // Bybit/OKX/CryptoCompare are what actually return a price here).
+    const { prices, sources, diag } = await fetchAllPrices(trades.map(t => t.contract));
+
     let updated = 0;
+    const skipped = [];
 
     for (const trade of trades) {
-      const price = await getCurrentPrice(trade.contract);
-      if (!price) continue;
+      const price = prices[trade.contract];
+      if (!price) {
+        console.warn(`[HPDR] No price for ${trade.contract}:`, diag[trade.contract]);
+        skipped.push({ contract: trade.contract, errors: diag[trade.contract] });
+        continue;
+      }
 
       const isLong = trade.direction === 'long';
       const entry = parseFloat(trade.entry_price);
@@ -171,7 +180,7 @@ export async function GET(req) {
       updated++;
     }
 
-    return Response.json({ checked: trades.length, updated });
+    return Response.json({ checked: trades.length, updated, sources, skipped });
   } catch (err) {
     console.error('[HPDR] Monitor error:', err.message);
     return Response.json({ error: err.message }, { status: 500 });

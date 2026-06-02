@@ -1,3 +1,7 @@
+export const dynamic = 'force-dynamic';
+
+import { fetchPrice } from '../../../lib/prices.js';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 
@@ -10,12 +14,10 @@ const CLOSE_SECRET = process.env.CLOSE_SECRET;
 
 const EQUITY_START = 1000;
 
+// Multi-source price (Gate.io is blocked on Vercel; falls back to Bybit/OKX/etc).
 async function getPrice(contract) {
-  const res = await fetch(
-    `https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`
-  );
-  const data = await res.json();
-  return parseFloat(data[0]?.last || 0);
+  const { price } = await fetchPrice(contract);
+  return price || 0;
 }
 
 export async function POST(req) {
