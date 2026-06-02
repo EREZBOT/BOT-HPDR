@@ -16,12 +16,16 @@ const supabase = SUPABASE_URL && SUPABASE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
   : null;
 
+// Load trades via the server-side route so SUPABASE_URL/SECRET_KEY are used
+// at runtime — the browser never needs NEXT_PUBLIC_* build-time vars for this.
 async function fetchTrades() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/trades?order=created_at.desc&limit=50`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-  });
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  try {
+    const res = await fetch('/api/trades', { cache: 'no-store' });
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
 
 function timeAgo(dateStr) {
@@ -217,8 +221,6 @@ function HistoryRow({ trade }) {
 }
 
 export default function Dashboard() {
-  
-console.log("TEST ENV:", process.env.NEXT_PUBLIC_TEST_ENV);
   const [trades, setTrades] = useState([]);
   const [prices, setPrices] = useState({});
   const [loading, setLoading] = useState(true);
