@@ -119,7 +119,7 @@ export async function POST(req) {
     //
     // Leverage is NOT in this formula. It determines margin requirements at the exchange,
     // not how much USDT you gain or lose per price unit on one contract.
-    const riskAmount = EQUITY * RISK_PCT;                     // e.g. $100
+    const riskAmount = EQUITY * RISK_PCT;                     // e.g. $10
     const riskPerContract = currentPrice * (slPct / 100);     // USDT at risk per contract
     const size = Math.max(1, Math.floor(riskAmount / riskPerContract));
 
