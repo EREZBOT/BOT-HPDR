@@ -6,7 +6,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const EQUITY = 1000;
-const RISK_PCT = 0.10;
+const RISK_PCT = 1.00;
 // LEVERAGE removed from this file — it was incorrectly used in position sizing.
 // Leverage is a margin concept (how much collateral the exchange requires) and
 // does NOT amplify the USDT P&L per contract in a paper system. See sizing below.
