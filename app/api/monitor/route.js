@@ -14,6 +14,19 @@ const EQUITY = 1000;
 // NOTHING gets updated. Oldest-first ordering rotates every trade through.
 const BATCH_LIMIT = 30;
 
+async function getSettings() {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bot_settings?id=eq.1`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    return data?.[0] ?? { use_sl: false };
+  } catch {
+    return { use_sl: false };
+  }
+}
+
 async function getOpenTrades() {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/trades?status=eq.open&order=created_at.asc&limit=${BATCH_LIMIT}`,
@@ -85,6 +98,7 @@ export async function GET(req) {
     // multi-source fetcher (Gate.io blocks Vercel's IP, so the fallbacks
     // Bybit/OKX/CryptoCompare are what actually return a price here).
     const { prices, sources, diag } = await fetchAllPrices(trades.map(t => t.contract));
+    const settings = await getSettings();
 
     let updated = 0;
     const skipped = [];
@@ -108,7 +122,7 @@ export async function GET(req) {
       const pnlPct = (pnlUsdt / EQUITY) * 100;
 
       // Stop loss hit
-      if ((isLong && price <= sl) || (!isLong && price >= sl)) {
+      if (settings.use_sl && sl && ((isLong && price <= sl) || (!isLong && price >= sl))) {
         const slPnl = isLong ? (sl - entry) * trade.size : (entry - sl) * trade.size;
         const slPct = (slPnl / EQUITY) * 100;
         await closeTrade(trade.id, sl, 'sl', slPnl, slPct);

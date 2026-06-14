@@ -226,6 +226,10 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [lastTick, setLastTick] = useState(null);
   const [wsStatus, setWsStatus] = useState('disconnected'); // 'connected' | 'disconnected' | 'error'
+  const [settings, setSettings] = useState({ leverage: 50, risk_pct: 10, use_sl: false });
+  const [sessions, setSessions] = useState([]);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [startingFresh, setStartingFresh] = useState(false);
 
   const wsRef = useRef(null);
   const pingRef = useRef(null);
@@ -308,6 +312,17 @@ export default function Dashboard() {
     };
   }, [applyPrices]);
 
+  // ── Settings + Sessions ────────────────────────────────────────────────────
+
+  const loadSettings = useCallback(async () => {
+    const [sRes, sessRes] = await Promise.all([
+      fetch('/api/settings').then(r => r.json()).catch(() => null),
+      fetch('/api/sessions').then(r => r.json()).catch(() => []),
+    ]);
+    if (sRes && !sRes.error) setSettings(sRes);
+    if (Array.isArray(sessRes)) setSessions(sessRes);
+  }, []);
+
   // ── Trade data ─────────────────────────────────────────────────────────────
 
   const loadTrades = useCallback(async () => {
@@ -315,6 +330,7 @@ export default function Dashboard() {
     const data = await fetchTrades();
     setTrades(data);
     setLoading(false);
+    loadSettings();
 
     const contracts = [...new Set(data.filter(t => t.status === 'open').map(t => t.contract))];
 
@@ -322,7 +338,7 @@ export default function Dashboard() {
     const prev = subscribedRef.current.slice().sort().join(',');
     const next = contracts.slice().sort().join(',');
     if (next !== prev) connectWs(contracts);
-  }, [connectWs]);
+  }, [connectWs, loadSettings]);
 
   useEffect(() => {
     loadTrades();
@@ -463,6 +479,43 @@ export default function Dashboard() {
             ))}
           </div>
 
+          {/* Settings card */}
+          <div style={{ background: '#11111e', border: '0.5px solid #1e1e2e', borderRadius: 8, padding: 14, marginBottom: 20 }}>
+            <div style={{ fontSize: 10, color: '#5a5a7a', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>Bot Settings</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 12, alignItems: 'end' }}>
+              <div>
+                <div style={{ fontSize: 10, color: '#5a5a7a', marginBottom: 6 }}>Leverage (1–80×)</div>
+                <input
+                  type="number" min={1} max={80} value={settings.leverage}
+                  onChange={e => setSettings(s => ({ ...s, leverage: Math.min(80, Math.max(1, parseInt(e.target.value) || 1)) }))}
+                  style={{ width: '100%', background: '#0a0a0f', border: '0.5px solid #2a2a3a', borderRadius: 4, color: '#e8e8f0', padding: '6px 8px', fontFamily: 'monospace', fontSize: 13 }}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#5a5a7a', marginBottom: 6 }}>Risk per trade (%)</div>
+                <input
+                  type="number" min={1} max={50} step={0.5} value={settings.risk_pct}
+                  onChange={e => setSettings(s => ({ ...s, risk_pct: Math.min(50, Math.max(0.5, parseFloat(e.target.value) || 1)) }))}
+                  style={{ width: '100%', background: '#0a0a0f', border: '0.5px solid #2a2a3a', borderRadius: 4, color: '#e8e8f0', padding: '6px 8px', fontFamily: 'monospace', fontSize: 13 }}
+                />
+              </div>
+              <button
+                onClick={async () => {
+                  setSavingSettings(true);
+                  await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+                  setSavingSettings(false);
+                }}
+                disabled={savingSettings}
+                style={{ padding: '8px 16px', borderRadius: 4, border: '0.5px solid #00e87a88', background: 'transparent', color: savingSettings ? '#5a5a7a' : '#00e87a', cursor: savingSettings ? 'not-allowed' : 'pointer', fontSize: 11, whiteSpace: 'nowrap' }}
+              >
+                {savingSettings ? 'Saving…' : 'Save Settings'}
+              </button>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 10, color: '#5a5a7a' }}>
+              Position size = floor(${EQUITY_START} × {settings.risk_pct}% × {settings.leverage}x ÷ price) contracts · No stop loss
+            </div>
+          </div>
+
           {/* Open positions */}
           <div style={{ marginBottom: 20 }}>
             <div style={s.sectionTitle}>Open positions ({open.length})</div>
@@ -502,6 +555,56 @@ export default function Dashboard() {
                 </table>
               )
             }
+          </div>
+
+          {/* Sessions history */}
+          {sessions.length > 0 && (
+            <div style={{ marginTop: 30 }}>
+              <div style={s.sectionTitle}>Previous sessions ({sessions.length})</div>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {['Session', 'Trades', 'W/L', 'Win %', 'Total P&L', 'Date'].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.map(sess => (
+                    <tr key={sess.id} style={{ borderBottom: '0.5px solid #111120' }}>
+                      <td style={{ padding: '8px', color: '#b0b0cc', fontSize: 11 }}>{sess.label}</td>
+                      <td style={{ padding: '8px', color: '#b0b0cc', fontFamily: 'monospace', fontSize: 11 }}>{sess.total_trades}</td>
+                      <td style={{ padding: '8px', color: '#b0b0cc', fontFamily: 'monospace', fontSize: 11 }}>{sess.wins}W / {sess.losses}L</td>
+                      <td style={{ padding: '8px', fontFamily: 'monospace', fontSize: 11, color: sess.win_rate >= 50 ? '#00e87a' : '#ff4466' }}>{sess.win_rate}%</td>
+                      <td style={{ padding: '8px', fontFamily: 'monospace', fontSize: 11, color: Number(sess.total_pnl) >= 0 ? '#00e87a' : '#ff4466' }}>
+                        {Number(sess.total_pnl) >= 0 ? '+' : ''}${fmt(sess.total_pnl)}
+                      </td>
+                      <td style={{ padding: '8px', fontSize: 10, color: '#5a5a7a' }}>{timeAgo(sess.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Start Fresh button */}
+          <div style={{ marginTop: 30, borderTop: '0.5px solid #1e1e2e', paddingTop: 20, textAlign: 'center' }}>
+            <button
+              onClick={async () => {
+                if (!confirm(`Archive this week's ${closed.length} closed trades (${winRate}% win rate, $${fmt(closedPnl)} P&L) and start fresh?`)) return;
+                const label = prompt('Session label (e.g. "Week 1"):', `Week ${sessions.length + 1}`) || `Week ${sessions.length + 1}`;
+                setStartingFresh(true);
+                const headers = { 'Content-Type': 'application/json' };
+                if (CLOSE_SECRET) headers['x-webhook-secret'] = CLOSE_SECRET;
+                await fetch('/api/sessions', { method: 'POST', headers, body: JSON.stringify({ label }) });
+                await loadTrades();
+                setStartingFresh(false);
+              }}
+              disabled={startingFresh}
+              style={{ padding: '8px 24px', borderRadius: 4, border: '0.5px solid #ff446688', background: 'transparent', color: startingFresh ? '#5a5a7a' : '#ff4466', cursor: startingFresh ? 'not-allowed' : 'pointer', fontSize: 11 }}
+            >
+              {startingFresh ? 'Archiving…' : '🗂 Start New Week (Archive & Reset)'}
+            </button>
           </div>
         </>
       )}
